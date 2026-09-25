@@ -5,21 +5,36 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
 
-Server::Server(std::uint16_t port, std::size_t shard_count)
+Server::Server(
+    std::uint16_t port,
+    std::size_t shard_count,
+    const std::string& replica_host,
+    int replica_port
+)
     : port_(port),
-      shard_manager_(shard_count, "shardkv") {}
+      replica_manager_(
+          shard_count,
+          "shardkv",
+          replica_host,
+          replica_port
+      ) {}
 
 void Server::start() {
-    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    int server_socket = socket(
+        AF_INET,
+        SOCK_STREAM,
+        0
+    );
 
     if (server_socket < 0) {
-        throw std::runtime_error("Failed to create socket");
+        throw std::runtime_error(
+            "Failed to create socket"
+        );
     }
 
     int option = 1;
@@ -43,26 +58,34 @@ void Server::start() {
             reinterpret_cast<sockaddr*>(&server_address),
             sizeof(server_address)
         ) < 0) {
+
         close(server_socket);
-        throw std::runtime_error("Failed to bind socket");
+
+        throw std::runtime_error(
+            "Failed to bind socket"
+        );
     }
 
     if (listen(server_socket, 10) < 0) {
         close(server_socket);
-        throw std::runtime_error("Failed to listen");
+
+        throw std::runtime_error(
+            "Failed to listen"
+        );
     }
 
     std::cout
         << "ShardKV server listening on port "
         << port_
         << " with "
-        << shard_manager_.shardCount()
+        << replica_manager_.shardCount()
         << " shards"
         << std::endl;
 
     while (true) {
         sockaddr_in client_address{};
-        socklen_t client_length = sizeof(client_address);
+        socklen_t client_length =
+            sizeof(client_address);
 
         int client_socket = accept(
             server_socket,
@@ -82,8 +105,12 @@ void Server::start() {
     }
 }
 
-void Server::handleClient(int client_socket) {
-    std::cout << "Client connected" << std::endl;
+void Server::handleClient(
+    int client_socket
+) {
+    std::cout
+        << "Client connected"
+        << std::endl;
 
     char buffer[4096];
 
@@ -101,18 +128,28 @@ void Server::handleClient(int client_socket) {
             break;
         }
 
-        pending_data.append(buffer, bytes_read);
+        pending_data.append(
+            buffer,
+            bytes_read
+        );
 
         std::size_t newline_position;
 
         while (
-            (newline_position = pending_data.find('\n'))
+            (newline_position =
+                 pending_data.find('\n'))
             != std::string::npos
         ) {
             std::string command =
-                pending_data.substr(0, newline_position);
+                pending_data.substr(
+                    0,
+                    newline_position
+                );
 
-            pending_data.erase(0, newline_position + 1);
+            pending_data.erase(
+                0,
+                newline_position + 1
+            );
 
             if (command.empty()) {
                 continue;
@@ -131,22 +168,33 @@ void Server::handleClient(int client_socket) {
             if (operation == "SET") {
                 stream >> value;
 
-                if (key.empty() || value.empty()) {
+                if (
+                    key.empty() ||
+                    value.empty()
+                ) {
                     response = "ERROR\n";
                 } else {
-                    shard_manager_.set(key, value);
+                    replica_manager_.set(
+                        key,
+                        value
+                    );
+
                     response = "OK\n";
                 }
             } else if (operation == "GET") {
                 if (key.empty()) {
                     response = "ERROR\n";
                 } else {
-                    auto result = shard_manager_.get(key);
+                    auto result =
+                        replica_manager_.get(key);
 
                     if (result.has_value()) {
-                        response = result.value() + "\n";
+                        response =
+                            result.value() +
+                            "\n";
                     } else {
-                        response = "NOT_FOUND\n";
+                        response =
+                            "NOT_FOUND\n";
                     }
                 }
             } else if (operation == "EXISTS") {
@@ -154,7 +202,7 @@ void Server::handleClient(int client_socket) {
                     response = "ERROR\n";
                 } else {
                     response =
-                        shard_manager_.exists(key)
+                        replica_manager_.exists(key)
                             ? "YES\n"
                             : "NO\n";
                 }
@@ -163,7 +211,7 @@ void Server::handleClient(int client_socket) {
                     response = "ERROR\n";
                 } else {
                     response =
-                        shard_manager_.remove(key)
+                        replica_manager_.remove(key)
                             ? "OK\n"
                             : "NOT_FOUND\n";
                 }
@@ -182,5 +230,7 @@ void Server::handleClient(int client_socket) {
 
     close(client_socket);
 
-    std::cout << "Client disconnected" << std::endl;
+    std::cout
+        << "Client disconnected"
+        << std::endl;
 }

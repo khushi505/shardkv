@@ -63,6 +63,7 @@ target_include_directories(shardkv PRIVATE
 
 target_link_libraries(shardkv PRIVATE
     shardmanager
+    replicamanager
 )
 
 enable_testing()
