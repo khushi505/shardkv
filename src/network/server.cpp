@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 Server::Server(int port)
@@ -67,9 +68,13 @@ void Server::start() {
 
         std::cout << "Client connected" << std::endl;
 
-        handleClient(client_fd);
+        std::thread client_thread(
+            &Server::handleClient,
+            this,
+            client_fd
+        );
 
-        close(client_fd);
+        client_thread.detach();
     }
 
     close(server_fd);
@@ -89,11 +94,13 @@ void Server::handleClient(int client_fd) {
 
         if (bytes_received < 0) {
             std::cerr << "Failed to receive data" << std::endl;
+            close(client_fd);
             return;
         }
 
         if (bytes_received == 0) {
             std::cout << "Client disconnected" << std::endl;
+            close(client_fd);
             return;
         }
 
@@ -184,6 +191,7 @@ void Server::handleClient(int client_fd) {
 
             if (bytes_sent < 0) {
                 std::cerr << "Failed to send response" << std::endl;
+                close(client_fd);
                 return;
             }
         }
