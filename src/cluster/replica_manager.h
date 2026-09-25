@@ -23,8 +23,10 @@ public:
     ) const;
 
     void promoteReplica(const std::string& key);
-
     bool isReplicaPromoted(const std::string& key) const;
+
+    void simulatePrimaryFailure(const std::string& key);
+    bool isPrimaryHealthy(const std::string& key) const;
 
     std::size_t getShard(const std::string& key) const;
     std::size_t shardCount() const;
@@ -36,4 +38,5 @@ private:
     std::vector<std::unique_ptr<KVStore>> replica_shards_;
 
     std::vector<bool> replica_promoted_;
+    std::vector<bool> primary_healthy_;
 };

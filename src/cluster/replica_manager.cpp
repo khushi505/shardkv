@@ -1,6 +1,5 @@
 #include "replica_manager.h"
 
-#include <stdexcept>
 #include <string>
 
 ReplicaManager::ReplicaManager(
@@ -8,7 +7,8 @@ ReplicaManager::ReplicaManager(
     const std::string& wal_prefix
 )
     : router_(shard_count),
-      replica_promoted_(shard_count, false) {
+      replica_promoted_(shard_count, false),
+      primary_healthy_(shard_count, true) {
 
     for (std::size_t i = 0; i < shard_count; ++i) {
         std::string primary_wal =
@@ -39,7 +39,7 @@ void ReplicaManager::set(
 ) {
     std::size_t shard = router_.getShard(key);
 
-    if (replica_promoted_[shard]) {
+    if (replica_promoted_[shard] || !primary_healthy_[shard]) {
         replica_shards_[shard]->set(key, value);
         return;
     }
@@ -53,7 +53,7 @@ std::optional<std::string> ReplicaManager::get(
 ) const {
     std::size_t shard = router_.getShard(key);
 
-    if (replica_promoted_[shard]) {
+    if (replica_promoted_[shard] || !primary_healthy_[shard]) {
         return replica_shards_[shard]->get(key);
     }
 
@@ -71,7 +71,7 @@ std::optional<std::string> ReplicaManager::getReplica(
 bool ReplicaManager::remove(const std::string& key) {
     std::size_t shard = router_.getShard(key);
 
-    if (replica_promoted_[shard]) {
+    if (replica_promoted_[shard] || !primary_healthy_[shard]) {
         return replica_shards_[shard]->remove(key);
     }
 
@@ -87,7 +87,7 @@ bool ReplicaManager::remove(const std::string& key) {
 bool ReplicaManager::exists(const std::string& key) const {
     std::size_t shard = router_.getShard(key);
 
-    if (replica_promoted_[shard]) {
+    if (replica_promoted_[shard] || !primary_healthy_[shard]) {
         return replica_shards_[shard]->exists(key);
     }
 
@@ -108,6 +108,23 @@ bool ReplicaManager::isReplicaPromoted(
     std::size_t shard = router_.getShard(key);
 
     return replica_promoted_[shard];
+}
+
+void ReplicaManager::simulatePrimaryFailure(
+    const std::string& key
+) {
+    std::size_t shard = router_.getShard(key);
+
+    primary_healthy_[shard] = false;
+    replica_promoted_[shard] = true;
+}
+
+bool ReplicaManager::isPrimaryHealthy(
+    const std::string& key
+) const {
+    std::size_t shard = router_.getShard(key);
+
+    return primary_healthy_[shard];
 }
 
 std::size_t ReplicaManager::getShard(
