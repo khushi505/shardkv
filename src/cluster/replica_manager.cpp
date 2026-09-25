@@ -1,12 +1,14 @@
 #include "replica_manager.h"
 
+#include <stdexcept>
 #include <string>
 
 ReplicaManager::ReplicaManager(
     std::size_t shard_count,
     const std::string& wal_prefix
 )
-    : router_(shard_count) {
+    : router_(shard_count),
+      replica_promoted_(shard_count, false) {
 
     for (std::size_t i = 0; i < shard_count; ++i) {
         std::string primary_wal =
@@ -37,6 +39,11 @@ void ReplicaManager::set(
 ) {
     std::size_t shard = router_.getShard(key);
 
+    if (replica_promoted_[shard]) {
+        replica_shards_[shard]->set(key, value);
+        return;
+    }
+
     primary_shards_[shard]->set(key, value);
     replica_shards_[shard]->set(key, value);
 }
@@ -45,6 +52,10 @@ std::optional<std::string> ReplicaManager::get(
     const std::string& key
 ) const {
     std::size_t shard = router_.getShard(key);
+
+    if (replica_promoted_[shard]) {
+        return replica_shards_[shard]->get(key);
+    }
 
     return primary_shards_[shard]->get(key);
 }
@@ -60,6 +71,10 @@ std::optional<std::string> ReplicaManager::getReplica(
 bool ReplicaManager::remove(const std::string& key) {
     std::size_t shard = router_.getShard(key);
 
+    if (replica_promoted_[shard]) {
+        return replica_shards_[shard]->remove(key);
+    }
+
     bool primary_removed =
         primary_shards_[shard]->remove(key);
 
@@ -72,7 +87,27 @@ bool ReplicaManager::remove(const std::string& key) {
 bool ReplicaManager::exists(const std::string& key) const {
     std::size_t shard = router_.getShard(key);
 
+    if (replica_promoted_[shard]) {
+        return replica_shards_[shard]->exists(key);
+    }
+
     return primary_shards_[shard]->exists(key);
+}
+
+void ReplicaManager::promoteReplica(
+    const std::string& key
+) {
+    std::size_t shard = router_.getShard(key);
+
+    replica_promoted_[shard] = true;
+}
+
+bool ReplicaManager::isReplicaPromoted(
+    const std::string& key
+) const {
+    std::size_t shard = router_.getShard(key);
+
+    return replica_promoted_[shard];
 }
 
 std::size_t ReplicaManager::getShard(

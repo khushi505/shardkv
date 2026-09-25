@@ -22,6 +22,10 @@ public:
         const std::string& key
     ) const;
 
+    void promoteReplica(const std::string& key);
+
+    bool isReplicaPromoted(const std::string& key) const;
+
     std::size_t getShard(const std::string& key) const;
     std::size_t shardCount() const;
 
@@ -30,4 +34,6 @@ private:
 
     std::vector<std::unique_ptr<KVStore>> primary_shards_;
     std::vector<std::unique_ptr<KVStore>> replica_shards_;
+
+    std::vector<bool> replica_promoted_;
 };
