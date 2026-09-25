@@ -1,7 +1,12 @@
 build/
+
 shardkv.log
 shardkv_*.log
+
 test_wal.log
 test_shard_*.log
+test_replica_*.log
+
 .vscode/
+
 .DS_Store

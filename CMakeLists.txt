@@ -36,6 +36,19 @@ target_link_libraries(shardmanager PUBLIC
     shardrouter
 )
 
+add_library(replicamanager
+    src/cluster/replica_manager.cpp
+)
+
+target_include_directories(replicamanager PUBLIC
+    src/cluster
+)
+
+target_link_libraries(replicamanager PUBLIC
+    kvstore
+    shardrouter
+)
+
 add_executable(shardkv
     src/main.cpp
     src/network/server.cpp
@@ -58,6 +71,7 @@ add_executable(kvstore_tests
     tests/wal_test.cpp
     tests/shard_router_test.cpp
     tests/shard_manager_test.cpp
+    tests/replica_manager_test.cpp
 )
 
 target_include_directories(kvstore_tests PRIVATE
@@ -68,6 +82,7 @@ target_link_libraries(kvstore_tests PRIVATE
     kvstore
     shardrouter
     shardmanager
+    replicamanager
     GTest::gtest_main
 )
 
