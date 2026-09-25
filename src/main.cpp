@@ -1,16 +1,14 @@
 #include <iostream>
 
-#include "kv_store.h"
+#include "server.h"
 
 int main() {
-    KVStore store("shardkv.log");
-
-    store.set("name", "Khushi");
-
-    auto value = store.get("name");
-
-    if (value.has_value()) {
-        std::cout << *value << std::endl;
+    try {
+        Server server(8080);
+        server.start();
+    } catch (const std::exception& e) {
+        std::cerr << "Server error: " << e.what() << std::endl;
+        return 1;
     }
 
     return 0;

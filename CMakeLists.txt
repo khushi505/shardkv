@@ -17,6 +17,11 @@ target_include_directories(kvstore PUBLIC
 
 add_executable(shardkv
     src/main.cpp
+    src/network/server.cpp
+)
+
+target_include_directories(shardkv PRIVATE
+    src/network
 )
 
 target_link_libraries(shardkv PRIVATE
