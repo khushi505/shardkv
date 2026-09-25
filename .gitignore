@@ -1,3 +1,5 @@
 build/
+shardkv.log
+test_wal.log
 .vscode/
 .DS_Store
