@@ -1,199 +1,186 @@
 #include "server.h"
 
-#include <iostream>
+#include <arpa/inet.h>
 #include <netinet/in.h>
-#include <sstream>
-#include <stdexcept>
-#include <string>
 #include <sys/socket.h>
-#include <thread>
 #include <unistd.h>
 
-Server::Server(int port)
+#include <cstring>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <thread>
+
+Server::Server(std::uint16_t port, std::size_t shard_count)
     : port_(port),
-      store_("shardkv.log") {}
+      shard_manager_(shard_count, "shardkv") {}
 
 void Server::start() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (server_fd < 0) {
+    if (server_socket < 0) {
         throw std::runtime_error("Failed to create socket");
     }
 
-    int opt = 1;
+    int option = 1;
 
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        close(server_fd);
-        throw std::runtime_error("Failed to configure socket");
-    }
+    setsockopt(
+        server_socket,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        &option,
+        sizeof(option)
+    );
 
-    sockaddr_in address{};
+    sockaddr_in server_address{};
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(port_);
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(port_);
 
     if (bind(
-            server_fd,
-            reinterpret_cast<sockaddr*>(&address),
-            sizeof(address)
+            server_socket,
+            reinterpret_cast<sockaddr*>(&server_address),
+            sizeof(server_address)
         ) < 0) {
-        close(server_fd);
+        close(server_socket);
         throw std::runtime_error("Failed to bind socket");
     }
 
-    if (listen(server_fd, 10) < 0) {
-        close(server_fd);
-        throw std::runtime_error("Failed to listen on socket");
+    if (listen(server_socket, 10) < 0) {
+        close(server_socket);
+        throw std::runtime_error("Failed to listen");
     }
 
-    std::cout << "ShardKV server listening on port "
-              << port_
-              << std::endl;
+    std::cout
+        << "ShardKV server listening on port "
+        << port_
+        << " with "
+        << shard_manager_.shardCount()
+        << " shards"
+        << std::endl;
 
     while (true) {
         sockaddr_in client_address{};
-        socklen_t client_address_length = sizeof(client_address);
+        socklen_t client_length = sizeof(client_address);
 
-        int client_fd = accept(
-            server_fd,
+        int client_socket = accept(
+            server_socket,
             reinterpret_cast<sockaddr*>(&client_address),
-            &client_address_length
+            &client_length
         );
 
-        if (client_fd < 0) {
-            std::cerr << "Failed to accept client connection" << std::endl;
+        if (client_socket < 0) {
             continue;
         }
 
-        std::cout << "Client connected" << std::endl;
-
-        std::thread client_thread(
+        std::thread(
             &Server::handleClient,
             this,
-            client_fd
-        );
-
-        client_thread.detach();
+            client_socket
+        ).detach();
     }
-
-    close(server_fd);
 }
 
-void Server::handleClient(int client_fd) {
-    char buffer[1024];
+void Server::handleClient(int client_socket) {
+    std::cout << "Client connected" << std::endl;
+
+    char buffer[4096];
+
     std::string pending_data;
 
     while (true) {
-        ssize_t bytes_received = recv(
-            client_fd,
+        ssize_t bytes_read = recv(
+            client_socket,
             buffer,
             sizeof(buffer),
             0
         );
 
-        if (bytes_received < 0) {
-            std::cerr << "Failed to receive data" << std::endl;
-            close(client_fd);
-            return;
+        if (bytes_read <= 0) {
+            break;
         }
 
-        if (bytes_received == 0) {
-            std::cout << "Client disconnected" << std::endl;
-            close(client_fd);
-            return;
-        }
+        pending_data.append(buffer, bytes_read);
 
-        pending_data.append(buffer, bytes_received);
+        std::size_t newline_position;
 
-        while (true) {
-            std::size_t newline_position = pending_data.find('\n');
+        while (
+            (newline_position = pending_data.find('\n'))
+            != std::string::npos
+        ) {
+            std::string command =
+                pending_data.substr(0, newline_position);
 
-            if (newline_position == std::string::npos) {
-                break;
-            }
+            pending_data.erase(0, newline_position + 1);
 
-            std::string request = pending_data.substr(
-                0,
-                newline_position
-            );
-
-            pending_data.erase(
-                0,
-                newline_position + 1
-            );
-
-            if (!request.empty() && request.back() == '\r') {
-                request.pop_back();
-            }
-
-            if (request.empty()) {
+            if (command.empty()) {
                 continue;
             }
 
-            std::stringstream stream(request);
+            std::stringstream stream(command);
 
-            std::string command;
+            std::string operation;
             std::string key;
             std::string value;
 
-            stream >> command >> key;
+            stream >> operation >> key;
 
             std::string response;
 
-            if (command == "SET") {
+            if (operation == "SET") {
                 stream >> value;
 
                 if (key.empty() || value.empty()) {
                     response = "ERROR\n";
                 } else {
-                    store_.set(key, value);
+                    shard_manager_.set(key, value);
                     response = "OK\n";
                 }
-            } else if (command == "GET") {
+            } else if (operation == "GET") {
                 if (key.empty()) {
                     response = "ERROR\n";
                 } else {
-                    auto result = store_.get(key);
+                    auto result = shard_manager_.get(key);
 
                     if (result.has_value()) {
-                        response = *result + "\n";
+                        response = result.value() + "\n";
                     } else {
                         response = "NOT_FOUND\n";
                     }
                 }
-            } else if (command == "DELETE") {
+            } else if (operation == "EXISTS") {
                 if (key.empty()) {
                     response = "ERROR\n";
-                } else if (store_.remove(key)) {
-                    response = "OK\n";
                 } else {
-                    response = "NOT_FOUND\n";
+                    response =
+                        shard_manager_.exists(key)
+                            ? "YES\n"
+                            : "NO\n";
                 }
-            } else if (command == "EXISTS") {
+            } else if (operation == "DELETE") {
                 if (key.empty()) {
                     response = "ERROR\n";
-                } else if (store_.exists(key)) {
-                    response = "YES\n";
                 } else {
-                    response = "NO\n";
+                    response =
+                        shard_manager_.remove(key)
+                            ? "OK\n"
+                            : "NOT_FOUND\n";
                 }
             } else {
                 response = "ERROR\n";
             }
 
-            ssize_t bytes_sent = send(
-                client_fd,
+            send(
+                client_socket,
                 response.c_str(),
                 response.size(),
                 0
             );
-
-            if (bytes_sent < 0) {
-                std::cerr << "Failed to send response" << std::endl;
-                close(client_fd);
-                return;
-            }
         }
     }
+
+    close(client_socket);
+
+    std::cout << "Client disconnected" << std::endl;
 }

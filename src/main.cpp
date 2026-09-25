@@ -4,10 +4,14 @@
 
 int main() {
     try {
-        Server server(8080);
+        Server server(8080, 3);
+
         server.start();
-    } catch (const std::exception& e) {
-        std::cerr << "Server error: " << e.what() << std::endl;
+    } catch (const std::exception& error) {
+        std::cerr << "Server error: "
+                  << error.what()
+                  << std::endl;
+
         return 1;
     }
 

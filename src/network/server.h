@@ -1,16 +1,18 @@
 #pragma once
 
-#include "kv_store.h"
+#include <cstdint>
+
+#include "shard_manager.h"
 
 class Server {
 public:
-    explicit Server(int port);
+    Server(std::uint16_t port, std::size_t shard_count);
 
     void start();
 
 private:
-    void handleClient(int client_fd);
+    void handleClient(int client_socket);
 
-    int port_;
-    KVStore store_;
+    std::uint16_t port_;
+    ShardManager shard_manager_;
 };
