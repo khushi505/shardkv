@@ -7,11 +7,17 @@
 #include <vector>
 
 #include "kv_store.h"
+#include "replication_client.h"
 #include "shard_router.h"
 
 class ReplicaManager {
 public:
-    ReplicaManager(std::size_t shard_count, const std::string& wal_prefix);
+    ReplicaManager(
+        std::size_t shard_count,
+        const std::string& wal_prefix,
+        const std::string& replica_host = "",
+        int replica_port = 0
+    );
 
     void set(const std::string& key, const std::string& value);
     std::optional<std::string> get(const std::string& key) const;
@@ -39,4 +45,6 @@ private:
 
     std::vector<bool> replica_promoted_;
     std::vector<bool> primary_healthy_;
+
+    std::unique_ptr<ReplicationClient> replication_client_;
 };

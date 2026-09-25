@@ -4,11 +4,21 @@
 
 ReplicaManager::ReplicaManager(
     std::size_t shard_count,
-    const std::string& wal_prefix
+    const std::string& wal_prefix,
+    const std::string& replica_host,
+    int replica_port
 )
     : router_(shard_count),
       replica_promoted_(shard_count, false),
       primary_healthy_(shard_count, true) {
+
+    if (!replica_host.empty() && replica_port > 0) {
+        replication_client_ =
+            std::make_unique<ReplicationClient>(
+                replica_host,
+                replica_port
+            );
+    }
 
     for (std::size_t i = 0; i < shard_count; ++i) {
         std::string primary_wal =
@@ -45,7 +55,12 @@ void ReplicaManager::set(
     }
 
     primary_shards_[shard]->set(key, value);
+
     replica_shards_[shard]->set(key, value);
+
+    if (replication_client_) {
+        replication_client_->sendSet(key, value);
+    }
 }
 
 std::optional<std::string> ReplicaManager::get(
@@ -68,7 +83,9 @@ std::optional<std::string> ReplicaManager::getReplica(
     return replica_shards_[shard]->get(key);
 }
 
-bool ReplicaManager::remove(const std::string& key) {
+bool ReplicaManager::remove(
+    const std::string& key
+) {
     std::size_t shard = router_.getShard(key);
 
     if (replica_promoted_[shard] || !primary_healthy_[shard]) {
@@ -81,10 +98,16 @@ bool ReplicaManager::remove(const std::string& key) {
     bool replica_removed =
         replica_shards_[shard]->remove(key);
 
+    if (replication_client_) {
+        replication_client_->sendDelete(key);
+    }
+
     return primary_removed || replica_removed;
 }
 
-bool ReplicaManager::exists(const std::string& key) const {
+bool ReplicaManager::exists(
+    const std::string& key
+) const {
     std::size_t shard = router_.getShard(key);
 
     if (replica_promoted_[shard] || !primary_healthy_[shard]) {

@@ -38,10 +38,12 @@ target_link_libraries(shardmanager PUBLIC
 
 add_library(replicamanager
     src/cluster/replica_manager.cpp
+    src/network/replication_client.cpp
 )
 
 target_include_directories(replicamanager PUBLIC
     src/cluster
+    src/network
 )
 
 target_link_libraries(replicamanager PUBLIC
@@ -74,7 +76,7 @@ add_executable(kvstore_tests
     tests/shard_manager_test.cpp
     tests/replica_manager_test.cpp
     tests/replication_client_test.cpp
-    src/network/replication_client.cpp
+    tests/replica_manager_network_test.cpp
 )
 
 target_include_directories(kvstore_tests PRIVATE
