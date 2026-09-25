@@ -19,7 +19,7 @@ Server::Server(
     : port_(port),
       replica_manager_(
           shard_count,
-          "shardkv",
+          "shardkv_" + std::to_string(port),
           replica_host,
           replica_port
       ) {}
@@ -105,9 +105,7 @@ void Server::start() {
     }
 }
 
-void Server::handleClient(
-    int client_socket
-) {
+void Server::handleClient(int client_socket) {
     std::cout
         << "Client connected"
         << std::endl;
@@ -190,8 +188,7 @@ void Server::handleClient(
 
                     if (result.has_value()) {
                         response =
-                            result.value() +
-                            "\n";
+                            result.value() + "\n";
                     } else {
                         response =
                             "NOT_FOUND\n";
