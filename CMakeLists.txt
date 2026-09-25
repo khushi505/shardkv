@@ -52,6 +52,7 @@ target_link_libraries(replicamanager PUBLIC
 add_executable(shardkv
     src/main.cpp
     src/network/server.cpp
+    src/network/replication_client.cpp
 )
 
 target_include_directories(shardkv PRIVATE
@@ -72,10 +73,13 @@ add_executable(kvstore_tests
     tests/shard_router_test.cpp
     tests/shard_manager_test.cpp
     tests/replica_manager_test.cpp
+    tests/replication_client_test.cpp
+    src/network/replication_client.cpp
 )
 
 target_include_directories(kvstore_tests PRIVATE
     src/cluster
+    src/network
 )
 
 target_link_libraries(kvstore_tests PRIVATE
