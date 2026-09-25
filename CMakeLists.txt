@@ -23,6 +23,19 @@ target_include_directories(shardrouter PUBLIC
     src/cluster
 )
 
+add_library(shardmanager
+    src/cluster/shard_manager.cpp
+)
+
+target_include_directories(shardmanager PUBLIC
+    src/cluster
+)
+
+target_link_libraries(shardmanager PUBLIC
+    kvstore
+    shardrouter
+)
+
 add_executable(shardkv
     src/main.cpp
     src/network/server.cpp
@@ -33,8 +46,7 @@ target_include_directories(shardkv PRIVATE
 )
 
 target_link_libraries(shardkv PRIVATE
-    kvstore
-    shardrouter
+    shardmanager
 )
 
 enable_testing()
@@ -45,6 +57,7 @@ add_executable(kvstore_tests
     tests/kv_store_test.cpp
     tests/wal_test.cpp
     tests/shard_router_test.cpp
+    tests/shard_manager_test.cpp
 )
 
 target_include_directories(kvstore_tests PRIVATE
@@ -54,6 +67,7 @@ target_include_directories(kvstore_tests PRIVATE
 target_link_libraries(kvstore_tests PRIVATE
     kvstore
     shardrouter
+    shardmanager
     GTest::gtest_main
 )
 
