@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,6 +13,15 @@
 #include "replication_client.h"
 #include "shard_router.h"
 
+struct ReplicationResult {
+    bool local_success = false;
+    bool replica_success = false;
+
+    bool success() const {
+        return local_success && replica_success;
+    }
+};
+
 class ReplicaManager {
 public:
     ReplicaManager(
@@ -21,9 +31,26 @@ public:
         int replica_port = 0
     );
 
-    void set(const std::string& key, const std::string& value);
-    std::optional<std::string> get(const std::string& key) const;
+    void set(
+        const std::string& key,
+        const std::string& value
+    );
+
+    ReplicationResult setWithResult(
+        const std::string& key,
+        const std::string& value
+    );
+
+    std::optional<std::string> get(
+        const std::string& key
+    ) const;
+
     bool remove(const std::string& key);
+
+    ReplicationResult removeWithResult(
+        const std::string& key
+    );
+
     bool exists(const std::string& key) const;
 
     std::optional<std::string> getReplica(
@@ -31,12 +58,19 @@ public:
     ) const;
 
     void promoteReplica(const std::string& key);
-    bool isReplicaPromoted(const std::string& key) const;
+
+    bool isReplicaPromoted(
+        const std::string& key
+    ) const;
 
     void simulatePrimaryFailure(const std::string& key);
-    bool isPrimaryHealthy(const std::string& key) const;
+
+    bool isPrimaryHealthy(
+        const std::string& key
+    ) const;
 
     std::size_t getShard(const std::string& key) const;
+
     std::size_t shardCount() const;
 
 private:
@@ -45,10 +79,12 @@ private:
     std::vector<std::unique_ptr<KVStore>> primary_shards_;
     std::vector<std::unique_ptr<KVStore>> replica_shards_;
 
-    std::vector<bool> replica_promoted_;
-    std::vector<bool> primary_healthy_;
+    // One mutex per shard; different shards can operate concurrently.
+    std::vector<std::unique_ptr<std::mutex>> shard_mutexes_;
+
+    // uint8_t avoids vector<bool>'s packed-bit concurrency issue.
+    std::vector<std::uint8_t> replica_promoted_;
+    std::vector<std::uint8_t> primary_healthy_;
 
     std::unique_ptr<ReplicationClient> replication_client_;
-
-    mutable std::mutex mutex_;
 };

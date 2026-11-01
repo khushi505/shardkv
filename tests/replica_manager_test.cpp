@@ -327,3 +327,36 @@ TEST_F(ReplicaManagerTest, ConcurrentMixedOperations) {
         }
     }
 }
+
+TEST_F(ReplicaManagerTest, ConcurrentWritesToSameKeyRemainConsistent) {
+    ReplicaManager manager(3, wal_prefix);
+
+    const int thread_count = 8;
+    const int writes_per_thread = 100;
+
+    std::vector<std::thread> threads;
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        threads.emplace_back([&manager, thread_id, writes_per_thread]() {
+            for (int i = 0; i < writes_per_thread; ++i) {
+                manager.set(
+                    "shared_key",
+                    "thread_" + std::to_string(thread_id) +
+                    "_value_" + std::to_string(i)
+                );
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    auto primary = manager.get("shared_key");
+    auto replica = manager.getReplica("shared_key");
+
+    ASSERT_TRUE(primary.has_value());
+    ASSERT_TRUE(replica.has_value());
+
+    EXPECT_EQ(primary.value(), replica.value());
+}

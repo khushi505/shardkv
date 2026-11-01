@@ -1,3 +1,4 @@
+
 #include "replication_client.h"
 
 #include <arpa/inet.h>
@@ -7,14 +8,19 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cctype>
+#include <cstdint>
 #include <string>
 
 namespace {
+
 constexpr int SOCKET_TIMEOUT_SECONDS = 3;
+constexpr std::size_t MAX_RESPONSE_SIZE = 1024;
 
 class SocketGuard {
 public:
-    explicit SocketGuard(int fd) : fd_(fd) {}
+    explicit SocketGuard(int fd)
+        : fd_(fd) {}
 
     ~SocketGuard() {
         if (fd_ >= 0) {
@@ -33,15 +39,35 @@ private:
     int fd_;
 };
 
+bool isValidToken(const std::string& token) {
+    if (token.empty()) {
+        return false;
+    }
+
+    for (unsigned char character : token) {
+        if (std::isspace(character)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool sendAll(int socket_fd, const std::string& data) {
     std::size_t total_sent = 0;
 
     while (total_sent < data.size()) {
+#ifdef MSG_NOSIGNAL
+        constexpr int SEND_FLAGS = MSG_NOSIGNAL;
+#else
+        constexpr int SEND_FLAGS = 0;
+#endif
+
         ssize_t bytes_sent = send(
             socket_fd,
             data.data() + total_sent,
             data.size() - total_sent,
-            MSG_NOSIGNAL
+            SEND_FLAGS
         );
 
         if (bytes_sent < 0) {
@@ -61,6 +87,47 @@ bool sendAll(int socket_fd, const std::string& data) {
 
     return true;
 }
+
+bool receiveResponse(
+    int socket_fd,
+    std::string& response
+) {
+    char buffer[256];
+
+    while (response.find('\n') == std::string::npos) {
+        ssize_t bytes_received = recv(
+            socket_fd,
+            buffer,
+            sizeof(buffer),
+            0
+        );
+
+        if (bytes_received < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            return false;
+        }
+
+        if (bytes_received == 0) {
+            return false;
+        }
+
+        response.append(
+            buffer,
+            static_cast<std::size_t>(bytes_received)
+        );
+
+        if (response.size() > MAX_RESPONSE_SIZE) {
+            return false;
+        }
+    }
+
+    // Accept exactly one newline-terminated response.
+    return response.find('\n') == response.size() - 1;
+}
+
 }
 
 ReplicationClient::ReplicationClient(
@@ -74,29 +141,37 @@ bool ReplicationClient::sendSet(
     const std::string& key,
     const std::string& value
 ) {
-    if (key.empty() || value.empty()) {
+    if (
+        !isValidToken(key) ||
+        !isValidToken(value)
+    ) {
         return false;
     }
 
     return sendCommand(
-        "SET " + key + " " + value + "\n"
+        "SET " + key + " " + value + "\n",
+        "OK\n"
     );
 }
 
 bool ReplicationClient::sendDelete(
     const std::string& key
 ) {
-    if (key.empty()) {
+    if (!isValidToken(key)) {
         return false;
     }
 
     return sendCommand(
-        "DELETE " + key + "\n"
+        "DELETE " + key + "\n",
+        "OK\n",
+        "NOT_FOUND\n"
     );
 }
 
 bool ReplicationClient::sendCommand(
-    const std::string& command
+    const std::string& command,
+    const std::string& expected_response,
+    const std::string& alternative_response
 ) {
     if (
         host_.empty() ||
@@ -173,37 +248,14 @@ bool ReplicationClient::sendCommand(
     }
 
     std::string response;
-    char buffer[256];
 
-    while (response.find('\n') == std::string::npos) {
-        ssize_t bytes_received = recv(
-            socket_fd,
-            buffer,
-            sizeof(buffer),
-            0
-        );
-
-        if (bytes_received < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-
-            return false;
-        }
-
-        if (bytes_received == 0) {
-            return false;
-        }
-
-        response.append(
-            buffer,
-            static_cast<std::size_t>(bytes_received)
-        );
-
-        if (response.size() > 1024) {
-            return false;
-        }
+    if (!receiveResponse(socket_fd, response)) {
+        return false;
     }
 
-    return response == "OK\n";
+    return response == expected_response ||
+           (
+               !alternative_response.empty() &&
+               response == alternative_response
+           );
 }

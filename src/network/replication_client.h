@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <string>
@@ -22,5 +23,9 @@ private:
     std::string host_;
     int port_;
 
-    bool sendCommand(const std::string& command);
+    bool sendCommand(
+        const std::string& command,
+        const std::string& expected_response,
+        const std::string& alternative_response = ""
+    );
 };
