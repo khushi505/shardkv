@@ -1,3 +1,4 @@
+
 cmake_minimum_required(VERSION 3.20)
 
 project(ShardKV VERSION 0.1.0 LANGUAGES CXX)
@@ -6,6 +7,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_package(Threads REQUIRED)
+find_package(GTest REQUIRED)
+
 add_library(kvstore
     src/core/kv_store.cpp
     src/core/wal.cpp
@@ -13,6 +17,10 @@ add_library(kvstore
 
 target_include_directories(kvstore PUBLIC
     src/core
+)
+
+target_link_libraries(kvstore PUBLIC
+    Threads::Threads
 )
 
 add_library(shardrouter
@@ -49,26 +57,32 @@ target_include_directories(replicamanager PUBLIC
 target_link_libraries(replicamanager PUBLIC
     kvstore
     shardrouter
+    Threads::Threads
+)
+
+add_library(shardserver
+    src/network/server.cpp
+)
+
+target_include_directories(shardserver PUBLIC
+    src/network
+    src/cluster
+)
+
+target_link_libraries(shardserver PUBLIC
+    replicamanager
+    Threads::Threads
 )
 
 add_executable(shardkv
     src/main.cpp
-    src/network/server.cpp
-    src/network/replication_client.cpp
-)
-
-target_include_directories(shardkv PRIVATE
-    src/network
 )
 
 target_link_libraries(shardkv PRIVATE
-    shardmanager
-    replicamanager
+    shardserver
 )
 
 enable_testing()
-
-find_package(GTest REQUIRED)
 
 add_executable(kvstore_tests
     tests/kv_store_test.cpp
@@ -78,6 +92,7 @@ add_executable(kvstore_tests
     tests/replica_manager_test.cpp
     tests/replication_client_test.cpp
     tests/replica_manager_network_test.cpp
+    tests/server_integration_test.cpp
 )
 
 target_include_directories(kvstore_tests PRIVATE
@@ -90,7 +105,9 @@ target_link_libraries(kvstore_tests PRIVATE
     shardrouter
     shardmanager
     replicamanager
+    shardserver
     GTest::gtest_main
+    Threads::Threads
 )
 
 include(GoogleTest)
