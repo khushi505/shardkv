@@ -4,8 +4,10 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -17,98 +19,80 @@ protected:
 
     std::thread server_thread;
 
-    void startServer(
-        const std::vector<std::string>& expected_commands
-    ) {
-        server_thread = std::thread(
-            [expected_commands]() {
-                int server_fd = socket(
-                    AF_INET,
-                    SOCK_STREAM,
-                    0
-                );
+    void startServer(const std::vector<std::string>& expected_commands) {
+        server_thread = std::thread([expected_commands]() {
+            int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+            ASSERT_GE(server_fd, 0);
 
-                ASSERT_GE(server_fd, 0);
-
-                int option = 1;
-
+            int option = 1;
+            ASSERT_EQ(
                 setsockopt(
                     server_fd,
                     SOL_SOCKET,
                     SO_REUSEADDR,
                     &option,
                     sizeof(option)
-                );
+                ),
+                0
+            );
 
-                sockaddr_in address{};
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            address.sin_port = htons(port);
 
-                address.sin_family = AF_INET;
-                address.sin_addr.s_addr =
-                    htonl(INADDR_LOOPBACK);
-                address.sin_port = htons(port);
+            ASSERT_EQ(
+                bind(
+                    server_fd,
+                    reinterpret_cast<sockaddr*>(&address),
+                    sizeof(address)
+                ),
+                0
+            );
 
-                ASSERT_EQ(
-                    bind(
-                        server_fd,
-                        reinterpret_cast<sockaddr*>(&address),
-                        sizeof(address)
-                    ),
+            ASSERT_EQ(listen(server_fd, 5), 0);
+
+            for (const auto& expected_command : expected_commands) {
+                int client_fd = accept(server_fd, nullptr, nullptr);
+                ASSERT_GE(client_fd, 0);
+
+                char buffer[1024]{};
+
+                ssize_t bytes_received = recv(
+                    client_fd,
+                    buffer,
+                    sizeof(buffer) - 1,
                     0
                 );
 
-                ASSERT_EQ(
-                    listen(server_fd, 5),
-                    0
+                ASSERT_GT(bytes_received, 0);
+
+                buffer[bytes_received] = '\0';
+
+                EXPECT_EQ(
+                    std::string(buffer),
+                    expected_command
                 );
 
-                for (const auto& expected_command : expected_commands) {
-                    int client_fd = accept(
-                        server_fd,
-                        nullptr,
-                        nullptr
-                    );
+                const std::string response = "OK\n";
 
-                    ASSERT_GE(client_fd, 0);
-
-                    char buffer[1024]{};
-
-                    ssize_t bytes_received = recv(
-                        client_fd,
-                        buffer,
-                        sizeof(buffer) - 1,
-                        0
-                    );
-
-                    ASSERT_GT(bytes_received, 0);
-
-                    buffer[bytes_received] = '\0';
-
-                    std::string received(buffer);
-
-                    EXPECT_EQ(
-                        received,
-                        expected_command
-                    );
-
-                    const std::string response = "OK\n";
-
+                EXPECT_EQ(
                     send(
                         client_fd,
                         response.c_str(),
                         response.size(),
                         0
-                    );
+                    ),
+                    static_cast<ssize_t>(response.size())
+                );
 
-                    close(client_fd);
-                }
-
-                close(server_fd);
+                close(client_fd);
             }
-        );
 
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(100)
-        );
+            close(server_fd);
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     void TearDown() override {
@@ -118,10 +102,7 @@ protected:
     }
 };
 
-TEST_F(
-    ReplicaManagerNetworkTest,
-    SetReplicatesOverTCP
-) {
+TEST_F(ReplicaManagerNetworkTest, SetReplicatesOverTCP) {
     startServer({
         "SET name Khushi\n"
     });
@@ -133,10 +114,7 @@ TEST_F(
         port
     );
 
-    manager.set(
-        "name",
-        "Khushi"
-    );
+    manager.set("name", "Khushi");
 
     EXPECT_EQ(
         manager.get("name"),
@@ -149,10 +127,7 @@ TEST_F(
     );
 }
 
-TEST_F(
-    ReplicaManagerNetworkTest,
-    DeleteReplicatesOverTCP
-) {
+TEST_F(ReplicaManagerNetworkTest, DeleteReplicatesOverTCP) {
     startServer({
         "SET name Khushi\n",
         "DELETE name\n"
@@ -165,26 +140,14 @@ TEST_F(
         port
     );
 
-    manager.set(
-        "name",
-        "Khushi"
-    );
+    manager.set("name", "Khushi");
 
-    ASSERT_TRUE(
-        manager.exists("name")
-    );
+    ASSERT_TRUE(manager.exists("name"));
 
-    EXPECT_TRUE(
-        manager.remove("name")
-    );
+    EXPECT_TRUE(manager.remove("name"));
 
-    EXPECT_FALSE(
-        manager.exists("name")
-    );
-
-    EXPECT_FALSE(
-        manager.getReplica("name").has_value()
-    );
+    EXPECT_FALSE(manager.exists("name"));
+    EXPECT_FALSE(manager.getReplica("name").has_value());
 }
 
 TEST_F(
@@ -198,10 +161,7 @@ TEST_F(
         9094
     );
 
-    manager.set(
-        "name",
-        "Khushi"
-    );
+    manager.set("name", "Khushi");
 
     EXPECT_EQ(
         manager.get("name"),
@@ -212,4 +172,136 @@ TEST_F(
         manager.getReplica("name"),
         std::optional<std::string>("Khushi")
     );
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    FailedReplicationIsQueued
+) {
+    ReplicaManager manager(
+        2,
+        "network_pending_test",
+        "127.0.0.1",
+        9094
+    );
+
+    const ReplicationResult result =
+        manager.setWithResult("name", "Khushi");
+
+    EXPECT_TRUE(result.local_success);
+    EXPECT_FALSE(result.replica_success);
+    EXPECT_FALSE(result.success());
+
+    EXPECT_EQ(manager.pendingReplicationCount(), 1);
+
+    EXPECT_EQ(
+        manager.get("name"),
+        std::optional<std::string>("Khushi")
+    );
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    PendingReplicationSucceedsAfterServerRecovers
+) {
+    ReplicaManager manager(
+        2,
+        "network_recovery_test",
+        "127.0.0.1",
+        port
+    );
+
+    const ReplicationResult result =
+        manager.setWithResult("name", "Khushi");
+
+    ASSERT_TRUE(result.local_success);
+    ASSERT_FALSE(result.replica_success);
+    ASSERT_EQ(manager.pendingReplicationCount(), 1);
+
+    startServer({
+        "SET name Khushi\n"
+    });
+
+    const std::size_t retried =
+        manager.retryPendingReplications();
+
+    EXPECT_EQ(retried, 1);
+    EXPECT_EQ(manager.pendingReplicationCount(), 0);
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    PendingOperationsAreRetriedInOrder
+) {
+    ReplicaManager manager(
+        2,
+        "network_order_test",
+        "127.0.0.1",
+        port
+    );
+
+    const ReplicationResult first =
+        manager.setWithResult("name", "Khushi");
+
+    ASSERT_TRUE(first.local_success);
+    ASSERT_FALSE(first.replica_success);
+
+    const ReplicationResult second =
+        manager.setWithResult("name", "Rahul");
+
+    EXPECT_TRUE(second.local_success);
+    EXPECT_FALSE(second.replica_success);
+
+    EXPECT_EQ(manager.pendingReplicationCount(), 2);
+
+    startServer({
+        "SET name Khushi\n",
+        "SET name Rahul\n"
+    });
+
+    const std::size_t retried =
+        manager.retryPendingReplications();
+
+    EXPECT_EQ(retried, 2);
+    EXPECT_EQ(manager.pendingReplicationCount(), 0);
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    PendingSetAndDeleteAreRetriedInOrder
+) {
+    ReplicaManager manager(
+        2,
+        "network_set_delete_order_test",
+        "127.0.0.1",
+        port
+    );
+
+    const ReplicationResult set_result =
+        manager.setWithResult("name", "Khushi");
+
+    ASSERT_TRUE(set_result.local_success);
+    ASSERT_FALSE(set_result.replica_success);
+
+    const ReplicationResult delete_result =
+        manager.removeWithResult("name");
+
+    EXPECT_TRUE(delete_result.local_success);
+    EXPECT_FALSE(delete_result.replica_success);
+
+    EXPECT_EQ(manager.pendingReplicationCount(), 2);
+
+    startServer({
+        "SET name Khushi\n",
+        "DELETE name\n"
+    });
+
+    const std::size_t retried =
+        manager.retryPendingReplications();
+
+    EXPECT_EQ(retried, 2);
+    EXPECT_EQ(manager.pendingReplicationCount(), 0);
+
+    EXPECT_FALSE(manager.get("name").has_value());
+    EXPECT_FALSE(manager.getReplica("name").has_value());
 }

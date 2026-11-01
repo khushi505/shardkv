@@ -11,6 +11,7 @@ ReplicaManager::ReplicaManager(
     int replica_port
 )
     : router_(shard_count),
+      pending_operations_(shard_count),
       replica_promoted_(shard_count, 0),
       primary_healthy_(shard_count, 1) {
 
@@ -62,7 +63,6 @@ ReplicationResult ReplicaManager::setWithResult(
 ) {
     const std::size_t shard = router_.getShard(key);
 
-    // Serialize operations belonging to this shard.
     std::lock_guard<std::mutex> shard_lock(
         *shard_mutexes_[shard]
     );
@@ -76,19 +76,37 @@ ReplicationResult ReplicaManager::setWithResult(
         return {true, true};
     }
 
-    // Update local primary and in-process replica.
     primary_shards_[shard]->set(key, value);
     replica_shards_[shard]->set(key, value);
 
-    // The shard lock preserves ordering while network I/O happens.
     if (!replication_client_) {
         return {true, true};
     }
 
-    const bool remote_success =
-        replication_client_->sendSet(key, value);
+    PendingOperation operation{
+        PendingOperation::Type::SET,
+        key,
+        value
+    };
 
-    return {true, remote_success};
+    // Never allow newer writes to bypass pending operations.
+    if (!pending_operations_[shard].empty()) {
+        pending_operations_[shard].push_back(
+            std::move(operation)
+        );
+
+        return {true, false};
+    }
+
+    if (!replicateOperation(operation)) {
+        pending_operations_[shard].push_back(
+            std::move(operation)
+        );
+
+        return {true, false};
+    }
+
+    return {true, true};
 }
 
 std::optional<std::string> ReplicaManager::get(
@@ -160,18 +178,35 @@ ReplicationResult ReplicaManager::removeWithResult(
     const bool local_success =
         primary_removed || replica_removed;
 
-    if (!local_success) {
-        return {false, false};
-    }
-
     if (!replication_client_) {
-        return {true, true};
+        return {local_success, true};
     }
 
-    const bool remote_success =
-        replication_client_->sendDelete(key);
+    PendingOperation operation{
+        PendingOperation::Type::DELETE,
+        key,
+        ""
+    };
 
-    return {true, remote_success};
+    // Send DELETE even when locally absent to repair possible
+    // stale remote data. DELETE is idempotent in our protocol.
+    if (!pending_operations_[shard].empty()) {
+        pending_operations_[shard].push_back(
+            std::move(operation)
+        );
+
+        return {local_success, false};
+    }
+
+    if (!replicateOperation(operation)) {
+        pending_operations_[shard].push_back(
+            std::move(operation)
+        );
+
+        return {local_success, false};
+    }
+
+    return {local_success, true};
 }
 
 bool ReplicaManager::exists(
@@ -240,6 +275,83 @@ bool ReplicaManager::isPrimaryHealthy(
     );
 
     return primary_healthy_[shard] != 0;
+}
+
+bool ReplicaManager::replicateOperation(
+    const PendingOperation& operation
+) {
+    if (!replication_client_) {
+        return true;
+    }
+
+    if (operation.type == PendingOperation::Type::SET) {
+        return replication_client_->sendSet(
+            operation.key,
+            operation.value
+        );
+    }
+
+    return replication_client_->sendDelete(
+        operation.key
+    );
+}
+
+std::size_t ReplicaManager::retryPendingReplications() {
+    if (!replication_client_) {
+        return 0;
+    }
+
+    std::size_t successful_retries = 0;
+
+    for (
+        std::size_t shard = 0;
+        shard < pending_operations_.size();
+        ++shard
+    ) {
+        std::lock_guard<std::mutex> shard_lock(
+            *shard_mutexes_[shard]
+        );
+
+        // Do not replay old primary operations after promotion.
+        if (
+            replica_promoted_[shard] ||
+            !primary_healthy_[shard]
+        ) {
+            continue;
+        }
+
+        auto& queue = pending_operations_[shard];
+
+        while (!queue.empty()) {
+            if (!replicateOperation(queue.front())) {
+                // Preserve FIFO order when an operation fails.
+                break;
+            }
+
+            queue.pop_front();
+            ++successful_retries;
+        }
+    }
+
+    return successful_retries;
+}
+
+std::size_t ReplicaManager::pendingReplicationCount() const {
+    std::size_t total = 0;
+
+    for (
+        std::size_t shard = 0;
+        shard < pending_operations_.size();
+        ++shard
+    ) {
+        std::lock_guard<std::mutex> shard_lock(
+            *shard_mutexes_[shard]
+        );
+
+        total += pending_operations_[shard].size();
+    }
+
+    return total;
 }
 
 std::size_t ReplicaManager::getShard(

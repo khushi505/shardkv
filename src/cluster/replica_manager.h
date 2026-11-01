@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -73,16 +74,35 @@ public:
 
     std::size_t shardCount() const;
 
+    std::size_t retryPendingReplications();
+
+    std::size_t pendingReplicationCount() const;
+
 private:
+    struct PendingOperation {
+        enum class Type {
+            SET,
+            DELETE
+        };
+
+        Type type;
+        std::string key;
+        std::string value;
+    };
+
+    bool replicateOperation(
+        const PendingOperation& operation
+    );
+
     ShardRouter router_;
 
     std::vector<std::unique_ptr<KVStore>> primary_shards_;
     std::vector<std::unique_ptr<KVStore>> replica_shards_;
 
-    // One mutex per shard; different shards can operate concurrently.
     std::vector<std::unique_ptr<std::mutex>> shard_mutexes_;
 
-    // uint8_t avoids vector<bool>'s packed-bit concurrency issue.
+    std::vector<std::deque<PendingOperation>> pending_operations_;
+
     std::vector<std::uint8_t> replica_promoted_;
     std::vector<std::uint8_t> primary_healthy_;
 
