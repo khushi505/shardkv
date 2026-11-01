@@ -1,4 +1,3 @@
-
 #include "replica_manager.h"
 
 #include <string>
@@ -8,12 +7,14 @@ ReplicaManager::ReplicaManager(
     std::size_t shard_count,
     const std::string& wal_prefix,
     const std::string& replica_host,
-    int replica_port
+    int replica_port,
+    std::chrono::milliseconds retry_interval
 )
     : router_(shard_count),
       pending_operations_(shard_count),
       replica_promoted_(shard_count, 0),
-      primary_healthy_(shard_count, 1) {
+      primary_healthy_(shard_count, 1),
+      retry_interval_(retry_interval) {
 
     if (!replica_host.empty() && replica_port > 0) {
         replication_client_ =
@@ -48,6 +49,12 @@ ReplicaManager::ReplicaManager(
             std::make_unique<KVStore>(replica_wal)
         );
     }
+
+    startRetryWorker();
+}
+
+ReplicaManager::~ReplicaManager() {
+    stopRetryWorker();
 }
 
 void ReplicaManager::set(
@@ -89,7 +96,6 @@ ReplicationResult ReplicaManager::setWithResult(
         value
     };
 
-    // Never allow newer writes to bypass pending operations.
     if (!pending_operations_[shard].empty()) {
         pending_operations_[shard].push_back(
             std::move(operation)
@@ -188,8 +194,6 @@ ReplicationResult ReplicaManager::removeWithResult(
         ""
     };
 
-    // Send DELETE even when locally absent to repair possible
-    // stale remote data. DELETE is idempotent in our protocol.
     if (!pending_operations_[shard].empty()) {
         pending_operations_[shard].push_back(
             std::move(operation)
@@ -312,7 +316,6 @@ std::size_t ReplicaManager::retryPendingReplications() {
             *shard_mutexes_[shard]
         );
 
-        // Do not replay old primary operations after promotion.
         if (
             replica_promoted_[shard] ||
             !primary_healthy_[shard]
@@ -324,7 +327,6 @@ std::size_t ReplicaManager::retryPendingReplications() {
 
         while (!queue.empty()) {
             if (!replicateOperation(queue.front())) {
-                // Preserve FIFO order when an operation fails.
                 break;
             }
 
@@ -362,4 +364,55 @@ std::size_t ReplicaManager::getShard(
 
 std::size_t ReplicaManager::shardCount() const {
     return router_.shardCount();
+}
+
+void ReplicaManager::startRetryWorker() {
+    if (
+        !replication_client_ ||
+        retry_interval_.count() <= 0
+    ) {
+        return;
+    }
+
+    retry_thread_ = std::thread(
+        &ReplicaManager::retryWorkerLoop,
+        this
+    );
+}
+
+void ReplicaManager::stopRetryWorker() {
+    {
+        std::lock_guard<std::mutex> lock(retry_mutex_);
+        stop_retry_worker_ = true;
+    }
+
+    retry_cv_.notify_all();
+
+    if (retry_thread_.joinable()) {
+        retry_thread_.join();
+    }
+}
+
+void ReplicaManager::retryWorkerLoop() {
+    std::unique_lock<std::mutex> lock(retry_mutex_);
+
+    while (!stop_retry_worker_) {
+        const bool should_stop = retry_cv_.wait_for(
+            lock,
+            retry_interval_,
+            [this]() {
+                return stop_retry_worker_;
+            }
+        );
+
+        if (should_stop) {
+            break;
+        }
+
+        lock.unlock();
+
+        retryPendingReplications();
+
+        lock.lock();
+    }
 }

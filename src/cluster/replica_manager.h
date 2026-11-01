@@ -1,6 +1,7 @@
-
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "kv_store.h"
@@ -29,8 +31,15 @@ public:
         std::size_t shard_count,
         const std::string& wal_prefix,
         const std::string& replica_host = "",
-        int replica_port = 0
+        int replica_port = 0,
+        std::chrono::milliseconds retry_interval =
+            std::chrono::milliseconds(1000)
     );
+
+    ~ReplicaManager();
+
+    ReplicaManager(const ReplicaManager&) = delete;
+    ReplicaManager& operator=(const ReplicaManager&) = delete;
 
     void set(
         const std::string& key,
@@ -94,6 +103,10 @@ private:
         const PendingOperation& operation
     );
 
+    void startRetryWorker();
+    void stopRetryWorker();
+    void retryWorkerLoop();
+
     ShardRouter router_;
 
     std::vector<std::unique_ptr<KVStore>> primary_shards_;
@@ -107,4 +120,12 @@ private:
     std::vector<std::uint8_t> primary_healthy_;
 
     std::unique_ptr<ReplicationClient> replication_client_;
+
+    std::thread retry_thread_;
+    std::mutex retry_mutex_;
+    std::condition_variable retry_cv_;
+
+    bool stop_retry_worker_ = false;
+
+    std::chrono::milliseconds retry_interval_;
 };

@@ -208,7 +208,8 @@ TEST_F(
         2,
         "network_recovery_test",
         "127.0.0.1",
-        port
+        port,
+        std::chrono::hours(1)
     );
 
     const ReplicationResult result =
@@ -237,7 +238,8 @@ TEST_F(
         2,
         "network_order_test",
         "127.0.0.1",
-        port
+        port,
+        std::chrono::hours(1)
     );
 
     const ReplicationResult first =
@@ -274,7 +276,8 @@ TEST_F(
         2,
         "network_set_delete_order_test",
         "127.0.0.1",
-        port
+        port,
+        std::chrono::hours(1)
     );
 
     const ReplicationResult set_result =
@@ -304,4 +307,43 @@ TEST_F(
 
     EXPECT_FALSE(manager.get("name").has_value());
     EXPECT_FALSE(manager.getReplica("name").has_value());
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    BackgroundWorkerRetriesPendingReplication
+) {
+    ReplicaManager manager(
+        2,
+        "network_background_retry_test",
+        "127.0.0.1",
+        port,
+        std::chrono::milliseconds(100)
+    );
+
+    const ReplicationResult result =
+        manager.setWithResult("name", "Khushi");
+
+    ASSERT_TRUE(result.local_success);
+    ASSERT_FALSE(result.replica_success);
+    ASSERT_EQ(manager.pendingReplicationCount(), 1);
+
+    startServer({
+        "SET name Khushi\n"
+    });
+
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+
+    while (
+        manager.pendingReplicationCount() != 0 &&
+        std::chrono::steady_clock::now() < deadline
+    ) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(50)
+        );
+    }
+
+    EXPECT_EQ(manager.pendingReplicationCount(), 0);
 }
