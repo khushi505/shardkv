@@ -41,25 +41,18 @@ public:
     ReplicaManager(const ReplicaManager&) = delete;
     ReplicaManager& operator=(const ReplicaManager&) = delete;
 
-    void set(
-        const std::string& key,
-        const std::string& value
-    );
+    void set(const std::string& key, const std::string& value);
 
     ReplicationResult setWithResult(
         const std::string& key,
         const std::string& value
     );
 
-    std::optional<std::string> get(
-        const std::string& key
-    ) const;
+    std::optional<std::string> get(const std::string& key) const;
 
     bool remove(const std::string& key);
 
-    ReplicationResult removeWithResult(
-        const std::string& key
-    );
+    ReplicationResult removeWithResult(const std::string& key);
 
     bool exists(const std::string& key) const;
 
@@ -69,15 +62,11 @@ public:
 
     void promoteReplica(const std::string& key);
 
-    bool isReplicaPromoted(
-        const std::string& key
-    ) const;
+    bool isReplicaPromoted(const std::string& key) const;
 
     void simulatePrimaryFailure(const std::string& key);
 
-    bool isPrimaryHealthy(
-        const std::string& key
-    ) const;
+    bool isPrimaryHealthy(const std::string& key) const;
 
     std::size_t getShard(const std::string& key) const;
 
@@ -99,8 +88,24 @@ private:
         std::string value;
     };
 
-    bool replicateOperation(
+    bool replicateOperation(const PendingOperation& operation);
+
+    bool persistPendingOperation(
+        std::size_t shard,
         const PendingOperation& operation
+    ) const;
+
+    bool persistPendingAcknowledgement(std::size_t shard) const;
+
+    void loadPendingOperations();
+
+    std::string pendingLogPath(std::size_t shard) const;
+
+    static std::string encodeHex(const std::string& value);
+
+    static bool decodeHex(
+        const std::string& encoded,
+        std::string& decoded
     );
 
     void startRetryWorker();
@@ -108,6 +113,8 @@ private:
     void retryWorkerLoop();
 
     ShardRouter router_;
+
+    std::string wal_prefix_;
 
     std::vector<std::unique_ptr<KVStore>> primary_shards_;
     std::vector<std::unique_ptr<KVStore>> replica_shards_;

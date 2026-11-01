@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <thread>
@@ -92,7 +93,9 @@ protected:
             close(server_fd);
         });
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(100)
+        );
     }
 
     void TearDown() override {
@@ -346,4 +349,75 @@ TEST_F(
     }
 
     EXPECT_EQ(manager.pendingReplicationCount(), 0);
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    PendingReplicationSurvivesManagerRestart
+) {
+    const std::string wal_prefix =
+        "network_persistent_queue_test";
+
+    std::string pending_log_path;
+
+    {
+        ReplicaManager manager(
+            2,
+            wal_prefix,
+            "127.0.0.1",
+            port,
+            std::chrono::hours(1)
+        );
+
+        const std::size_t shard =
+            manager.getShard("name");
+
+        pending_log_path =
+            wal_prefix +
+            "_pending_replication_" +
+            std::to_string(shard) +
+            ".log";
+
+        const ReplicationResult result =
+            manager.setWithResult("name", "Khushi");
+
+        ASSERT_TRUE(result.local_success);
+        ASSERT_FALSE(result.replica_success);
+
+        EXPECT_EQ(manager.pendingReplicationCount(), 1);
+    }
+
+    startServer({
+        "SET name Khushi\n"
+    });
+
+    {
+        ReplicaManager restarted_manager(
+            2,
+            wal_prefix,
+            "127.0.0.1",
+            port,
+            std::chrono::hours(1)
+        );
+
+        EXPECT_EQ(
+            restarted_manager.pendingReplicationCount(),
+            1
+        );
+
+        const std::size_t retried =
+            restarted_manager.retryPendingReplications();
+
+        EXPECT_EQ(retried, 1);
+        EXPECT_EQ(
+            restarted_manager.pendingReplicationCount(),
+            0
+        );
+    }
+
+    if (server_thread.joinable()) {
+        server_thread.join();
+    }
+
+    std::remove(pending_log_path.c_str());
 }

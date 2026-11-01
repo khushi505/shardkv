@@ -1,5 +1,7 @@
 #include "replica_manager.h"
 
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -11,6 +13,7 @@ ReplicaManager::ReplicaManager(
     std::chrono::milliseconds retry_interval
 )
     : router_(shard_count),
+      wal_prefix_(wal_prefix),
       pending_operations_(shard_count),
       replica_promoted_(shard_count, 0),
       primary_healthy_(shard_count, 1),
@@ -29,14 +32,14 @@ ReplicaManager::ReplicaManager(
             std::make_unique<std::mutex>()
         );
 
-        std::string primary_wal =
-            wal_prefix +
+        const std::string primary_wal =
+            wal_prefix_ +
             "_primary_" +
             std::to_string(i) +
             ".log";
 
-        std::string replica_wal =
-            wal_prefix +
+        const std::string replica_wal =
+            wal_prefix_ +
             "_replica_" +
             std::to_string(i) +
             ".log";
@@ -50,6 +53,7 @@ ReplicaManager::ReplicaManager(
         );
     }
 
+    loadPendingOperations();
     startRetryWorker();
 }
 
@@ -97,6 +101,8 @@ ReplicationResult ReplicaManager::setWithResult(
     };
 
     if (!pending_operations_[shard].empty()) {
+        persistPendingOperation(shard, operation);
+
         pending_operations_[shard].push_back(
             std::move(operation)
         );
@@ -105,6 +111,8 @@ ReplicationResult ReplicaManager::setWithResult(
     }
 
     if (!replicateOperation(operation)) {
+        persistPendingOperation(shard, operation);
+
         pending_operations_[shard].push_back(
             std::move(operation)
         );
@@ -146,13 +154,8 @@ std::optional<std::string> ReplicaManager::getReplica(
     return replica_shards_[shard]->get(key);
 }
 
-bool ReplicaManager::remove(
-    const std::string& key
-) {
-    const ReplicationResult result =
-        removeWithResult(key);
-
-    return result.local_success;
+bool ReplicaManager::remove(const std::string& key) {
+    return removeWithResult(key).local_success;
 }
 
 ReplicationResult ReplicaManager::removeWithResult(
@@ -195,6 +198,8 @@ ReplicationResult ReplicaManager::removeWithResult(
     };
 
     if (!pending_operations_[shard].empty()) {
+        persistPendingOperation(shard, operation);
+
         pending_operations_[shard].push_back(
             std::move(operation)
         );
@@ -203,6 +208,8 @@ ReplicationResult ReplicaManager::removeWithResult(
     }
 
     if (!replicateOperation(operation)) {
+        persistPendingOperation(shard, operation);
+
         pending_operations_[shard].push_back(
             std::move(operation)
         );
@@ -213,9 +220,7 @@ ReplicationResult ReplicaManager::removeWithResult(
     return {local_success, true};
 }
 
-bool ReplicaManager::exists(
-    const std::string& key
-) const {
+bool ReplicaManager::exists(const std::string& key) const {
     const std::size_t shard = router_.getShard(key);
 
     std::lock_guard<std::mutex> shard_lock(
@@ -232,9 +237,7 @@ bool ReplicaManager::exists(
     return primary_shards_[shard]->exists(key);
 }
 
-void ReplicaManager::promoteReplica(
-    const std::string& key
-) {
+void ReplicaManager::promoteReplica(const std::string& key) {
     const std::size_t shard = router_.getShard(key);
 
     std::lock_guard<std::mutex> shard_lock(
@@ -295,9 +298,7 @@ bool ReplicaManager::replicateOperation(
         );
     }
 
-    return replication_client_->sendDelete(
-        operation.key
-    );
+    return replication_client_->sendDelete(operation.key);
 }
 
 std::size_t ReplicaManager::retryPendingReplications() {
@@ -327,6 +328,12 @@ std::size_t ReplicaManager::retryPendingReplications() {
 
         while (!queue.empty()) {
             if (!replicateOperation(queue.front())) {
+                break;
+            }
+
+            // Persist the acknowledgement before removing the
+            // operation from the in-memory queue.
+            if (!persistPendingAcknowledgement(shard)) {
                 break;
             }
 
@@ -364,6 +371,219 @@ std::size_t ReplicaManager::getShard(
 
 std::size_t ReplicaManager::shardCount() const {
     return router_.shardCount();
+}
+
+std::string ReplicaManager::pendingLogPath(
+    std::size_t shard
+) const {
+    return wal_prefix_ +
+        "_pending_replication_" +
+        std::to_string(shard) +
+        ".log";
+}
+
+std::string ReplicaManager::encodeHex(
+    const std::string& value
+) {
+    static constexpr char digits[] = "0123456789ABCDEF";
+
+    if (value.empty()) {
+        return "-";
+    }
+
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+
+    for (unsigned char character : value) {
+        encoded.push_back(digits[character >> 4]);
+        encoded.push_back(digits[character & 0x0F]);
+    }
+
+    return encoded;
+}
+
+bool ReplicaManager::decodeHex(
+    const std::string& encoded,
+    std::string& decoded
+) {
+    if (encoded == "-") {
+        decoded.clear();
+        return true;
+    }
+
+    if (encoded.empty() || encoded.size() % 2 != 0) {
+        return false;
+    }
+
+    auto hexValue = [](char character) -> int {
+        if (character >= '0' && character <= '9') {
+            return character - '0';
+        }
+
+        if (character >= 'A' && character <= 'F') {
+            return character - 'A' + 10;
+        }
+
+        if (character >= 'a' && character <= 'f') {
+            return character - 'a' + 10;
+        }
+
+        return -1;
+    };
+
+    decoded.clear();
+    decoded.reserve(encoded.size() / 2);
+
+    for (std::size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = hexValue(encoded[i]);
+        const int low = hexValue(encoded[i + 1]);
+
+        if (high < 0 || low < 0) {
+            return false;
+        }
+
+        decoded.push_back(
+            static_cast<char>((high << 4) | low)
+        );
+    }
+
+    return true;
+}
+
+bool ReplicaManager::persistPendingOperation(
+    std::size_t shard,
+    const PendingOperation& operation
+) const {
+    std::ofstream output(
+        pendingLogPath(shard),
+        std::ios::app | std::ios::binary
+    );
+
+    if (!output.is_open()) {
+        return false;
+    }
+
+    if (operation.type == PendingOperation::Type::SET) {
+        output
+            << "S "
+            << encodeHex(operation.key)
+            << " "
+            << encodeHex(operation.value)
+            << '\n';
+    } else {
+        output
+            << "D "
+            << encodeHex(operation.key)
+            << '\n';
+    }
+
+    output.flush();
+
+    return output.good();
+}
+
+bool ReplicaManager::persistPendingAcknowledgement(
+    std::size_t shard
+) const {
+    std::ofstream output(
+        pendingLogPath(shard),
+        std::ios::app | std::ios::binary
+    );
+
+    if (!output.is_open()) {
+        return false;
+    }
+
+    output << "A\n";
+    output.flush();
+
+    return output.good();
+}
+
+void ReplicaManager::loadPendingOperations() {
+    for (
+        std::size_t shard = 0;
+        shard < pending_operations_.size();
+        ++shard
+    ) {
+        std::ifstream input(
+            pendingLogPath(shard),
+            std::ios::binary
+        );
+
+        if (!input.is_open()) {
+            continue;
+        }
+
+        std::string line;
+
+        while (std::getline(input, line)) {
+            if (line == "A") {
+                if (!pending_operations_[shard].empty()) {
+                    pending_operations_[shard].pop_front();
+                }
+
+                continue;
+            }
+
+            if (line.size() < 3 || line[1] != ' ') {
+                break;
+            }
+
+            const char operation_type = line[0];
+            const std::string payload = line.substr(2);
+
+            if (operation_type == 'S') {
+                const std::size_t separator = payload.find(' ');
+
+                if (separator == std::string::npos) {
+                    break;
+                }
+
+                std::string key;
+                std::string value;
+
+                if (
+                    !decodeHex(
+                        payload.substr(0, separator),
+                        key
+                    ) ||
+                    !decodeHex(
+                        payload.substr(separator + 1),
+                        value
+                    )
+                ) {
+                    break;
+                }
+
+                pending_operations_[shard].push_back({
+                    PendingOperation::Type::SET,
+                    std::move(key),
+                    std::move(value)
+                });
+
+                continue;
+            }
+
+            if (operation_type == 'D') {
+                std::string key;
+
+                if (!decodeHex(payload, key)) {
+                    break;
+                }
+
+                pending_operations_[shard].push_back({
+                    PendingOperation::Type::DELETE,
+                    std::move(key),
+                    ""
+                });
+
+                continue;
+            }
+
+            break;
+        }
+    }
 }
 
 void ReplicaManager::startRetryWorker() {
