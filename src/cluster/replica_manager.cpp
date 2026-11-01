@@ -1,3 +1,4 @@
+
 #include "replica_manager.h"
 
 #include <string>
@@ -47,6 +48,8 @@ void ReplicaManager::set(
     const std::string& key,
     const std::string& value
 ) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     if (replica_promoted_[shard] || !primary_healthy_[shard]) {
@@ -66,6 +69,8 @@ void ReplicaManager::set(
 std::optional<std::string> ReplicaManager::get(
     const std::string& key
 ) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     if (replica_promoted_[shard] || !primary_healthy_[shard]) {
@@ -78,6 +83,8 @@ std::optional<std::string> ReplicaManager::get(
 std::optional<std::string> ReplicaManager::getReplica(
     const std::string& key
 ) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     return replica_shards_[shard]->get(key);
@@ -86,6 +93,8 @@ std::optional<std::string> ReplicaManager::getReplica(
 bool ReplicaManager::remove(
     const std::string& key
 ) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     if (replica_promoted_[shard] || !primary_healthy_[shard]) {
@@ -108,6 +117,8 @@ bool ReplicaManager::remove(
 bool ReplicaManager::exists(
     const std::string& key
 ) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     if (replica_promoted_[shard] || !primary_healthy_[shard]) {
@@ -120,6 +131,8 @@ bool ReplicaManager::exists(
 void ReplicaManager::promoteReplica(
     const std::string& key
 ) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     replica_promoted_[shard] = true;
@@ -128,6 +141,8 @@ void ReplicaManager::promoteReplica(
 bool ReplicaManager::isReplicaPromoted(
     const std::string& key
 ) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     return replica_promoted_[shard];
@@ -136,6 +151,8 @@ bool ReplicaManager::isReplicaPromoted(
 void ReplicaManager::simulatePrimaryFailure(
     const std::string& key
 ) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     primary_healthy_[shard] = false;
@@ -145,6 +162,8 @@ void ReplicaManager::simulatePrimaryFailure(
 bool ReplicaManager::isPrimaryHealthy(
     const std::string& key
 ) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     std::size_t shard = router_.getShard(key);
 
     return primary_healthy_[shard];

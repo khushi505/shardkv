@@ -1,7 +1,9 @@
+
 #pragma once
 
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,4 +49,6 @@ private:
     std::vector<bool> primary_healthy_;
 
     std::unique_ptr<ReplicationClient> replication_client_;
+
+    mutable std::mutex mutex_;
 };

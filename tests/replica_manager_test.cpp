@@ -1,5 +1,8 @@
+
 #include <cstdio>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -191,11 +194,8 @@ TEST_F(ReplicaManagerTest, PromotionIsPerShard) {
     manager.set("name", "Khushi");
     manager.set("city", "Delhi");
 
-    std::size_t name_shard =
-        manager.getShard("name");
-
-    std::size_t city_shard =
-        manager.getShard("city");
+    std::size_t name_shard = manager.getShard("name");
+    std::size_t city_shard = manager.getShard("city");
 
     manager.promoteReplica("name");
 
@@ -227,5 +227,103 @@ TEST_F(ReplicaManagerTest, PromotedReplicaRecoversItsData) {
 
         EXPECT_EQ(result.value(), "Khushi");
         EXPECT_EQ(replica.value(), "Khushi");
+    }
+}
+
+TEST_F(ReplicaManagerTest, ConcurrentWrites) {
+    ReplicaManager manager(3, wal_prefix);
+
+    const int thread_count = 8;
+    const int operations_per_thread = 100;
+
+    std::vector<std::thread> threads;
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        threads.emplace_back([&manager, thread_id]() {
+            for (int i = 0; i < operations_per_thread; ++i) {
+                std::string key =
+                    "thread_" + std::to_string(thread_id) +
+                    "_key_" + std::to_string(i);
+
+                std::string value =
+                    "value_" + std::to_string(i);
+
+                manager.set(key, value);
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        for (int i = 0; i < operations_per_thread; ++i) {
+            std::string key =
+                "thread_" + std::to_string(thread_id) +
+                "_key_" + std::to_string(i);
+
+            auto result = manager.get(key);
+            auto replica = manager.getReplica(key);
+
+            ASSERT_TRUE(result.has_value());
+            ASSERT_TRUE(replica.has_value());
+
+            EXPECT_EQ(result.value(), "value_" + std::to_string(i));
+            EXPECT_EQ(replica.value(), "value_" + std::to_string(i));
+        }
+    }
+}
+
+TEST_F(ReplicaManagerTest, ConcurrentMixedOperations) {
+    ReplicaManager manager(3, wal_prefix);
+
+    const int thread_count = 8;
+    const int operations_per_thread = 100;
+
+    std::vector<std::thread> threads;
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        threads.emplace_back([&manager, thread_id]() {
+            for (int i = 0; i < operations_per_thread; ++i) {
+                std::string key =
+                    "thread_" + std::to_string(thread_id) +
+                    "_key_" + std::to_string(i);
+
+                manager.set(key, "value");
+                manager.exists(key);
+                manager.get(key);
+
+                if (i % 2 == 0) {
+                    manager.remove(key);
+                }
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        for (int i = 0; i < operations_per_thread; ++i) {
+            std::string key =
+                "thread_" + std::to_string(thread_id) +
+                "_key_" + std::to_string(i);
+
+            if (i % 2 == 0) {
+                EXPECT_FALSE(manager.exists(key));
+                EXPECT_FALSE(manager.getReplica(key).has_value());
+            } else {
+                auto result = manager.get(key);
+                auto replica = manager.getReplica(key);
+
+                ASSERT_TRUE(result.has_value());
+                ASSERT_TRUE(replica.has_value());
+
+                EXPECT_EQ(result.value(), "value");
+                EXPECT_EQ(replica.value(), "value");
+            }
+        }
     }
 }
