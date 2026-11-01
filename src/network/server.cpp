@@ -1,4 +1,3 @@
-
 #include "server.h"
 
 #include <arpa/inet.h>
@@ -12,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace {
 
@@ -53,9 +53,25 @@ bool sendAll(int socket_fd, const std::string& data) {
     return true;
 }
 
+std::string healthToString(NodeHealth health) {
+    switch (health) {
+        case NodeHealth::HEALTHY:
+            return "HEALTHY";
+
+        case NodeHealth::UNHEALTHY:
+            return "UNHEALTHY";
+
+        case NodeHealth::UNKNOWN:
+            return "UNKNOWN";
+    }
+
+    return "UNKNOWN";
+}
+
 std::string processCommand(
     const std::string& command,
-    ReplicaManager& replica_manager
+    ReplicaManager& replica_manager,
+    ClusterManager& cluster_manager
 ) {
     std::stringstream stream(command);
 
@@ -64,9 +80,58 @@ std::string processCommand(
     std::string value;
     std::string extra;
 
-    stream >> operation >> key;
+    stream >> operation;
 
-    if (operation.empty() || key.empty()) {
+    if (operation.empty()) {
+        return "ERROR\n";
+    }
+
+    if (operation == "PING") {
+        stream >> key;
+
+        if (key.empty() || (stream >> extra)) {
+            return "ERROR\n";
+        }
+
+        if (!cluster_manager.recordHeartbeat(key)) {
+            return "ERROR\n";
+        }
+
+        return "PONG " + cluster_manager.localNodeId() + "\n";
+    }
+
+    if (operation == "CLUSTER") {
+        if (stream >> extra) {
+            return "ERROR\n";
+        }
+
+        std::ostringstream response;
+
+        response << "LOCAL "
+                 << cluster_manager.localNodeId()
+                 << " HEALTHY\n";
+
+        const auto members = cluster_manager.members();
+
+        for (const auto& member : members) {
+            response << member.node_id
+                     << " "
+                     << healthToString(member.health)
+                     << " "
+                     << member.host
+                     << ":"
+                     << member.port
+                     << "\n";
+        }
+
+        response << "END\n";
+
+        return response.str();
+    }
+
+    stream >> key;
+
+    if (key.empty()) {
         return "ERROR\n";
     }
 
@@ -78,6 +143,7 @@ std::string processCommand(
         }
 
         replica_manager.set(key, value);
+
         return "OK\n";
     }
 
@@ -122,7 +188,11 @@ Server::Server(
     std::uint16_t port,
     std::size_t shard_count,
     const std::string& replica_host,
-    int replica_port
+    int replica_port,
+    const std::string& node_id,
+    std::vector<ClusterPeerConfig> peers,
+    std::chrono::milliseconds heartbeat_interval,
+    std::chrono::milliseconds heartbeat_timeout
 )
     : port_(port),
       replica_manager_(
@@ -130,6 +200,15 @@ Server::Server(
           "shardkv_" + std::to_string(port),
           replica_host,
           replica_port
+      ),
+      cluster_manager_(
+          node_id.empty()
+              ? "node-" + std::to_string(port)
+              : node_id,
+          port,
+          std::move(peers),
+          heartbeat_interval,
+          heartbeat_timeout
       ) {}
 
 Server::~Server() {
@@ -155,7 +234,10 @@ void Server::start() {
 
     if (listening_socket < 0) {
         running_ = false;
-        throw std::runtime_error("Failed to create server socket");
+
+        throw std::runtime_error(
+            "Failed to create server socket"
+        );
     }
 
     server_socket_ = listening_socket;
@@ -170,7 +252,10 @@ void Server::start() {
             sizeof(option)
         ) < 0) {
         stop();
-        throw std::runtime_error("Failed to set SO_REUSEADDR");
+
+        throw std::runtime_error(
+            "Failed to set SO_REUSEADDR"
+        );
     }
 
     sockaddr_in server_address{};
@@ -185,12 +270,18 @@ void Server::start() {
             sizeof(server_address)
         ) < 0) {
         stop();
-        throw std::runtime_error("Failed to bind server socket");
+
+        throw std::runtime_error(
+            "Failed to bind server socket"
+        );
     }
 
     if (listen(listening_socket, 10) < 0) {
         stop();
-        throw std::runtime_error("Failed to listen on server socket");
+
+        throw std::runtime_error(
+            "Failed to listen on server socket"
+        );
     }
 
     sockaddr_in bound_address{};
@@ -202,10 +293,20 @@ void Server::start() {
             &address_length
         ) < 0) {
         stop();
-        throw std::runtime_error("Failed to retrieve server port");
+
+        throw std::runtime_error(
+            "Failed to retrieve server port"
+        );
     }
 
     port_ = ntohs(bound_address.sin_port);
+
+    try {
+        cluster_manager_.start();
+    } catch (...) {
+        stop();
+        throw;
+    }
 
     std::cout
         << "ShardKV server listening on port "
@@ -213,6 +314,11 @@ void Server::start() {
         << " with "
         << replica_manager_.shardCount()
         << " shards"
+        << std::endl;
+
+    std::cout
+        << "Node ID: "
+        << cluster_manager_.localNodeId()
         << std::endl;
 
     while (running_) {
@@ -282,12 +388,14 @@ void Server::start() {
             } catch (...) {
                 client_sockets_.erase(client_socket);
                 close(client_socket);
+
                 thread_creation_failed = true;
             }
         }
 
         if (thread_creation_failed) {
             stop();
+
             throw std::runtime_error(
                 "Failed to create client thread"
             );
@@ -297,11 +405,15 @@ void Server::start() {
     stop();
     joinClientThreads();
 
-    std::cout << "ShardKV server stopped" << std::endl;
+    std::cout
+        << "ShardKV server stopped"
+        << std::endl;
 }
 
 void Server::stop() {
     running_ = false;
+
+    cluster_manager_.stop();
 
     const int listening_socket = server_socket_.exchange(-1);
 
@@ -328,7 +440,9 @@ void Server::joinClientThreads() {
 }
 
 void Server::handleClient(int client_socket) {
-    std::cout << "Client connected" << std::endl;
+    std::cout
+        << "Client connected"
+        << std::endl;
 
     char buffer[READ_BUFFER_SIZE];
     std::string pending_data;
@@ -390,7 +504,8 @@ void Server::handleClient(int client_socket) {
 
             const std::string response = processCommand(
                 command,
-                replica_manager_
+                replica_manager_,
+                cluster_manager_
             );
 
             if (!sendAll(client_socket, response)) {
@@ -409,8 +524,11 @@ void Server::handleClient(int client_socket) {
 
     {
         std::lock_guard<std::mutex> lock(clients_mutex_);
+
         client_sockets_.erase(client_socket);
     }
 
-    std::cout << "Client disconnected" << std::endl;
+    std::cout
+        << "Client disconnected"
+        << std::endl;
 }

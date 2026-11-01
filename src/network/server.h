@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cluster_manager.h"
 #include "replica_manager.h"
 
 class Server {
@@ -17,7 +19,13 @@ public:
         std::uint16_t port,
         std::size_t shard_count,
         const std::string& replica_host = "",
-        int replica_port = 0
+        int replica_port = 0,
+        const std::string& node_id = "",
+        std::vector<ClusterPeerConfig> peers = {},
+        std::chrono::milliseconds heartbeat_interval =
+            std::chrono::milliseconds(1000),
+        std::chrono::milliseconds heartbeat_timeout =
+            std::chrono::milliseconds(3500)
     );
 
     ~Server();
@@ -44,4 +52,5 @@ private:
     std::vector<std::thread> client_threads_;
 
     ReplicaManager replica_manager_;
+    ClusterManager cluster_manager_;
 };

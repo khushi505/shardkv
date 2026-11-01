@@ -1,4 +1,3 @@
-
 cmake_minimum_required(VERSION 3.20)
 
 project(ShardKV VERSION 0.1.0 LANGUAGES CXX)
@@ -62,6 +61,7 @@ target_link_libraries(replicamanager PUBLIC
 
 add_library(shardserver
     src/network/server.cpp
+    src/cluster/cluster_manager.cpp
 )
 
 target_include_directories(shardserver PUBLIC
@@ -93,6 +93,7 @@ add_executable(kvstore_tests
     tests/replication_client_test.cpp
     tests/replica_manager_network_test.cpp
     tests/server_integration_test.cpp
+    tests/cluster_manager_test.cpp
 )
 
 target_include_directories(kvstore_tests PRIVATE
