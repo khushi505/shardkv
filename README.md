@@ -1,4 +1,3 @@
-
 # ShardKV
 
 **A Distributed Key-Value Store Built from Scratch in C++**
@@ -12,18 +11,21 @@ The project is being developed incrementally, with an emphasis on understanding 
 ## Features
 
 ### 1. Key-Value Storage Engine
+
 - In-memory storage using `std::unordered_map`.
 - Supports `SET`, `GET`, `DELETE`, and `EXISTS`.
 - Persistent storage through Write-Ahead Logging.
 - WAL-based recovery after application restart.
 
 ### 2. Write-Ahead Logging (WAL)
+
 - Records write operations before updating in-memory state.
 - Replays persisted operations during initialization.
 - Supports recovery of stored data after restart.
 - Maintains separate WAL files for primary and replica shards.
 
 ### 3. TCP Networking
+
 - Custom text-based request/response protocol.
 - TCP server using POSIX sockets.
 - Handles multiple client connections.
@@ -32,11 +34,13 @@ The project is being developed incrementally, with an emphasis on understanding 
 - Graceful server shutdown and client connection cleanup.
 
 ### 4. Sharding
+
 - Partitions data across multiple logical shards.
 - Routes keys to shards using a hash-based router.
 - Maintains independent primary and replica stores for each shard.
 
 ### 5. Replication
+
 - Maintains primary and replica copies of shard data.
 - Supports local replication between in-process stores.
 - Supports remote replication over TCP.
@@ -44,8 +48,10 @@ The project is being developed incrementally, with an emphasis on understanding 
 - Supports `SET` and `DELETE` replication commands.
 - Exposes replication results through `ReplicationResult`.
 - Reports local operation success separately from replica replication success.
+- Queues failed remote replication operations for retry.
 
 ### 6. Concurrency
+
 - Supports concurrent client operations.
 - Uses independent synchronization locks for individual shards.
 - Serializes operations within the same shard.
@@ -53,7 +59,20 @@ The project is being developed incrementally, with an emphasis on understanding 
 - Keeps the shard lock during remote replication to preserve write ordering.
 - Synchronizes reads, deletes, and replica promotion with shard operations.
 
-### 7. Replica Promotion
+### 7. Reliable Replication and Recovery
+
+- Maintains a FIFO pending-operation queue for each shard.
+- Prevents newer operations from bypassing older failed operations.
+- Automatically retries failed replication operations using a background worker.
+- Supports manual retry through `retryPendingReplications()`.
+- Persists pending replication operations to disk.
+- Recovers pending operations after ReplicaManager restart.
+- Uses durable file writes with `fsync()`.
+- Persists replication acknowledgements before removing operations from the pending queue.
+- Handles incomplete trailing log records during recovery.
+
+### 8. Replica Promotion
+
 - Supports simulated primary failure.
 - Supports manual replica promotion.
 - Routes operations to the promoted replica.
@@ -64,43 +83,43 @@ The project is being developed incrementally, with an emphasis on understanding 
 ## Architecture
 
 ```text
-                    Client
-                       |
-                       v
-                +--------------+
-                | TCP Server   |
-                +--------------+
-                       |
-                       v
-                +--------------+
-                | Command      |
-                | Processing   |
-                +--------------+
-                       |
-                       v
-                +--------------+
-                | Replica      |
-                | Manager      |
-                +--------------+
-                       |
-             +---------+---------+
-             |                   |
-             v                   v
-        Shard Router        Replication
-             |                 Client
-       +-----+-----+               |
-       |     |     |               v
-       v     v     v          Remote Replica
-     Shard Shard Shard
-       0     1     2
-       |     |     |
-       v     v     v
-    Primary Primary Primary
-       |     |     |
-    Replica Replica Replica
-       |     |     |
-       v     v     v
-      WAL   WAL   WAL
+                         Client
+                           |
+                           v
+                    +--------------+
+                    | TCP Server   |
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    | Command      |
+                    | Processing   |
+                    +--------------+
+                           |
+                           v
+                    +--------------+
+                    | Replica      |
+                    | Manager      |
+                    +--------------+
+                           |
+                 +---------+---------+
+                 |                   |
+                 v                   v
+            Shard Router       Replication
+                 |              Client
+           +-----+-----+             |
+           |     |     |             v
+           v     v     v       Remote Replica
+         Shard Shard Shard
+           0     1     2
+           |     |     |
+           v     v     v
+         Primary Primary Primary
+           |     |     |
+         Replica Replica Replica
+           |     |     |
+           v     v     v
+          WAL   WAL   WAL
 ```
 
 ### Replication Flow
@@ -114,7 +133,9 @@ For a normal primary write:
 5. The in-process replica shard is updated.
 6. The ReplicationClient sends the operation to the configured remote replica.
 7. The remote response is validated.
-8. The operation result reports local and remote replication status.
+8. If remote replication fails, the operation is persisted in the pending replication queue.
+9. The background worker retries pending operations.
+10. A durable acknowledgement is recorded before the operation is removed from the queue.
 
 ### Per-Shard Synchronization
 
@@ -129,31 +150,44 @@ This design provides:
 
 Remote network operations are performed without holding a global manager lock.
 
+### Persistent Replication Queue
+
+Failed remote replication operations are stored in per-shard append-only log files.
+
+The queue supports:
+
+- FIFO operation ordering.
+- Persistence across application restarts.
+- Recovery of unacknowledged operations.
+- Durable acknowledgement records.
+- Recovery from incomplete trailing log records.
+
+This helps prevent failed replication operations from being lost when the application restarts.
+
 ---
 
 ## Project Structure
 
 ```text
 shardkv/
-|
 ├── CMakeLists.txt
 ├── README.md
-|
+│
 ├── src/
 │   ├── main.cpp
-│   |
+│   │
 │   ├── core/
 │   │   ├── kv_store.h
 │   │   ├── kv_store.cpp
 │   │   ├── wal.h
 │   │   └── wal.cpp
-│   |
+│   │
 │   ├── network/
 │   │   ├── server.h
 │   │   ├── server.cpp
 │   │   ├── replication_client.h
 │   │   └── replication_client.cpp
-│   |
+│   │
 │   └── cluster/
 │       ├── shard_router.h
 │       ├── shard_router.cpp
@@ -161,7 +195,7 @@ shardkv/
 │       ├── shard_manager.cpp
 │       ├── replica_manager.h
 │       └── replica_manager.cpp
-|
+│
 └── tests/
     ├── kv_store_test.cpp
     ├── wal_test.cpp
@@ -184,7 +218,9 @@ shardkv/
 | Networking | POSIX TCP Sockets |
 | Storage | `std::unordered_map` |
 | Persistence | Write-Ahead Logging |
-| Concurrency | C++ Threads, Mutexes |
+| Concurrency | C++ Threads, Mutexes, Condition Variables |
+| Replication | TCP-based Primary–Replica |
+| Durability | POSIX File Operations, `fsync()` |
 | Testing | GoogleTest |
 | Version Control | Git and GitHub |
 
@@ -288,14 +324,21 @@ The result structure:
 struct ReplicationResult {
     bool local_success = false;
     bool replica_success = false;
+    bool persistence_success = true;
 
     bool success() const {
-        return local_success && replica_success;
+        return local_success &&
+               replica_success &&
+               persistence_success;
     }
 };
 ```
 
-This separates local storage success from remote replication success.
+The result separates three aspects of an operation:
+
+- `local_success`: Whether the local operation succeeded.
+- `replica_success`: Whether remote replication succeeded.
+- `persistence_success`: Whether the required pending-operation persistence succeeded.
 
 A successful local write does not necessarily mean that the remote replica received the operation.
 
@@ -315,10 +358,16 @@ Current test coverage includes:
 - Concurrent writes and mixed operations.
 - TCP replication.
 - Replication server failures.
+- Replication response validation.
+- Failed replication queuing.
+- FIFO retry ordering.
+- Automatic background retries.
+- Persistent replication queue recovery.
+- Incomplete trailing log record recovery.
 - TCP server integration.
 - Graceful server behavior.
 
-**Current test status: 45 tests passing.**
+**Current test status: 52 tests passing.**
 
 Run the complete suite:
 
@@ -332,15 +381,20 @@ ctest --test-dir build --output-on-failure
 
 ShardKV is an evolving distributed-systems learning project. The following capabilities are not yet implemented:
 
-- Automatic retries for failed remote replication.
-- Persistent replication queues.
+- Dynamic cluster membership.
+- Heartbeat-based node health monitoring.
 - Automatic leader election.
 - Distributed consensus using Raft.
+- Quorum-based reads and writes.
 - Split-brain prevention.
-- Replication recovery and reconciliation after network failures.
-- Production-grade cluster membership and rebalancing.
+- Network partition handling.
+- Automated data reconciliation after node recovery.
+- Distributed transactions.
+- Production-grade cluster rebalancing.
 
 Replica promotion is currently simulated rather than coordinated through a consensus protocol.
+
+The replication queue provides durable retry records, but it does not provide full distributed transaction guarantees or consensus-based consistency.
 
 ---
 
@@ -348,55 +402,59 @@ Replica promotion is currently simulated rather than coordinated through a conse
 
 | Phase | Feature | Status |
 |---|---|---|
-| 1 | In-memory Key-Value Store | Completed |
-| 2 | Write-Ahead Logging | Completed |
-| 3 | TCP Server and Networking | Completed |
-| 4 | Sharding and Replica Management | Completed |
-| 5 | Replication Reliability and Recovery | In Progress |
-| 6 | Automatic Failover | Planned |
-| 7 | Raft Consensus | Planned |
-| 8 | Performance Benchmarking | Planned |
-| 9 | Failure Testing | Planned |
-| 10 | Docker-Based Multi-Node Deployment | Planned |
+| 1 | Core KV Store and WAL | Completed |
+| 2 | TCP Server and Client Communication | Completed |
+| 3 | Sharding and Replication Foundation | Completed |
+| 4 | Reliable Replication and Durability | Completed |
+| 5 | Distributed Cluster Communication | Planned |
+| 6 | Leader Election and Automatic Failover | Planned |
+| 7 | Consistency and Quorum | Planned |
+| 8 | Network Partition Handling | Planned |
+| 9 | Distributed Transactions | Planned |
+| 10 | Performance Optimization | Planned |
+| 11 | Production Hardening | Planned |
 
----
+### Upcoming Work
 
-## Learning Objectives
+**Phase 5 — Distributed Cluster Communication**
 
-ShardKV is designed to explore practical systems engineering concepts:
+- Node identity.
+- Cluster membership.
+- Heartbeat mechanism.
+- Node health monitoring.
 
-- Database internals and storage engines.
-- Hash-based partitioning.
-- Write-Ahead Logging and crash recovery.
-- TCP networking and protocol design.
-- Multithreading and synchronization.
-- Primary-replica replication.
-- Failure handling and distributed consistency.
-- System performance and reliability.
+**Phase 6 — Leader Election and Automatic Failover**
 
----
+- Leader election algorithm.
+- Primary failure detection.
+- Automatic replica promotion.
+- Leader recovery.
 
-## Future Improvements
+**Phase 7 — Consistency and Quorum**
 
-- Implement a persistent replication queue.
-- Add retry and reconciliation mechanisms.
-- Introduce replication sequence numbers.
-- Implement automatic leader election.
-- Integrate the Raft consensus algorithm.
-- Add cluster membership management.
-- Benchmark throughput and tail latency.
-- Support Docker-based multi-node deployment.
+- Strong and eventual consistency.
+- Quorum-based writes.
+- Read consistency.
+- Replication acknowledgements.
 
----
+**Phase 8 — Network Partition Handling**
 
-## Author
+- Network partition detection.
+- Split-brain prevention.
+- Node recovery.
+- Data reconciliation.
 
-**Khushi Singh**
+**Phase 9 — Distributed Transactions**
 
-GitHub: [@khushi505](https://github.com/khushi505)
+- Distributed coordination.
+- Transaction management.
+- Atomicity guarantees.
 
-Repository: [ShardKV](https://github.com/khushi505/shardkv)
+**Phase 10 — Performance Optimization**
 
----
+- Benchmarking.
+- Concurrent request optimization.
+- Memory optimization.
+- Throughput and latency improvements.
 
-*ShardKV is an ongoing project built to understand and implement the fundamentals of distributed databases and systems programming from scratch.*
+**Phase 11 —
