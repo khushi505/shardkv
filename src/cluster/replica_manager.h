@@ -19,9 +19,12 @@
 struct ReplicationResult {
     bool local_success = false;
     bool replica_success = false;
+    bool persistence_success = true;
 
     bool success() const {
-        return local_success && replica_success;
+        return local_success &&
+               replica_success &&
+               persistence_success;
     }
 };
 
@@ -95,7 +98,14 @@ private:
         const PendingOperation& operation
     ) const;
 
-    bool persistPendingAcknowledgement(std::size_t shard) const;
+    bool persistPendingAcknowledgement(
+        std::size_t shard
+    ) const;
+
+    bool appendDurably(
+        const std::string& path,
+        const std::string& record
+    ) const;
 
     void loadPendingOperations();
 

@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <thread>
@@ -19,6 +20,21 @@ protected:
     static constexpr int port = 9093;
 
     std::thread server_thread;
+
+    void cleanupPendingLogs(
+        const std::string& wal_prefix,
+        std::size_t shard_count = 2
+    ) {
+        for (std::size_t shard = 0; shard < shard_count; ++shard) {
+            const std::string path =
+                wal_prefix +
+                "_pending_replication_" +
+                std::to_string(shard) +
+                ".log";
+
+            std::remove(path.c_str());
+        }
+    }
 
     void startServer(const std::vector<std::string>& expected_commands) {
         server_thread = std::thread([expected_commands]() {
@@ -181,26 +197,36 @@ TEST_F(
     ReplicaManagerNetworkTest,
     FailedReplicationIsQueued
 ) {
-    ReplicaManager manager(
-        2,
-        "network_pending_test",
-        "127.0.0.1",
-        9094
-    );
+    const std::string wal_prefix = "network_pending_test";
 
-    const ReplicationResult result =
-        manager.setWithResult("name", "Khushi");
+    cleanupPendingLogs(wal_prefix);
 
-    EXPECT_TRUE(result.local_success);
-    EXPECT_FALSE(result.replica_success);
-    EXPECT_FALSE(result.success());
+    {
+        ReplicaManager manager(
+            2,
+            wal_prefix,
+            "127.0.0.1",
+            9094,
+            std::chrono::hours(1)
+        );
 
-    EXPECT_EQ(manager.pendingReplicationCount(), 1);
+        const ReplicationResult result =
+            manager.setWithResult("name", "Khushi");
 
-    EXPECT_EQ(
-        manager.get("name"),
-        std::optional<std::string>("Khushi")
-    );
+        EXPECT_TRUE(result.local_success);
+        EXPECT_FALSE(result.replica_success);
+        EXPECT_TRUE(result.persistence_success);
+        EXPECT_FALSE(result.success());
+
+        EXPECT_EQ(manager.pendingReplicationCount(), 1);
+
+        EXPECT_EQ(
+            manager.get("name"),
+            std::optional<std::string>("Khushi")
+        );
+    }
+
+    cleanupPendingLogs(wal_prefix);
 }
 
 TEST_F(
@@ -220,6 +246,7 @@ TEST_F(
 
     ASSERT_TRUE(result.local_success);
     ASSERT_FALSE(result.replica_success);
+    ASSERT_TRUE(result.persistence_success);
     ASSERT_EQ(manager.pendingReplicationCount(), 1);
 
     startServer({
@@ -294,6 +321,7 @@ TEST_F(
 
     EXPECT_TRUE(delete_result.local_success);
     EXPECT_FALSE(delete_result.replica_success);
+    EXPECT_TRUE(delete_result.persistence_success);
 
     EXPECT_EQ(manager.pendingReplicationCount(), 2);
 
@@ -329,6 +357,7 @@ TEST_F(
 
     ASSERT_TRUE(result.local_success);
     ASSERT_FALSE(result.replica_success);
+    ASSERT_TRUE(result.persistence_success);
     ASSERT_EQ(manager.pendingReplicationCount(), 1);
 
     startServer({
@@ -383,6 +412,7 @@ TEST_F(
 
         ASSERT_TRUE(result.local_success);
         ASSERT_FALSE(result.replica_success);
+        ASSERT_TRUE(result.persistence_success);
 
         EXPECT_EQ(manager.pendingReplicationCount(), 1);
     }
@@ -413,6 +443,64 @@ TEST_F(
             restarted_manager.pendingReplicationCount(),
             0
         );
+    }
+
+    if (server_thread.joinable()) {
+        server_thread.join();
+    }
+
+    std::remove(pending_log_path.c_str());
+}
+
+TEST_F(
+    ReplicaManagerNetworkTest,
+    IncompleteTrailingLogRecordDoesNotBlockRecovery
+) {
+    const std::string wal_prefix =
+        "network_incomplete_log_test";
+
+    ShardRouter router(2);
+    const std::size_t shard = router.getShard("name");
+
+    const std::string pending_log_path =
+        wal_prefix +
+        "_pending_replication_" +
+        std::to_string(shard) +
+        ".log";
+
+    {
+        std::ofstream output(
+            pending_log_path,
+            std::ios::binary | std::ios::trunc
+        );
+
+        ASSERT_TRUE(output.is_open());
+
+        output
+            << "S 6E616D65 4B6875736869\n"
+            << "S 6E616D65 4B68";
+    }
+
+    startServer({
+        "SET name Khushi\n"
+    });
+
+    {
+        ReplicaManager manager(
+            2,
+            wal_prefix,
+            "127.0.0.1",
+            port,
+            std::chrono::hours(1)
+        );
+
+        EXPECT_EQ(manager.pendingReplicationCount(), 1);
+
+        const std::size_t retried =
+            manager.retryPendingReplications();
+
+        EXPECT_EQ(retried, 1);
+        EXPECT_EQ(manager.pendingReplicationCount(), 0);
     }
 
     if (server_thread.joinable()) {

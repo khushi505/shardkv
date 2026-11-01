@@ -1,9 +1,14 @@
 #include "replica_manager.h"
 
+#include <cerrno>
+#include <fcntl.h>
 #include <fstream>
-#include <sstream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 #include <utility>
+
+#include <unistd.h>
 
 ReplicaManager::ReplicaManager(
     std::size_t shard_count,
@@ -84,14 +89,14 @@ ReplicationResult ReplicaManager::setWithResult(
 
     if (use_replica) {
         replica_shards_[shard]->set(key, value);
-        return {true, true};
+        return {true, true, true};
     }
 
     primary_shards_[shard]->set(key, value);
     replica_shards_[shard]->set(key, value);
 
     if (!replication_client_) {
-        return {true, true};
+        return {true, true, true};
     }
 
     PendingOperation operation{
@@ -101,26 +106,30 @@ ReplicationResult ReplicaManager::setWithResult(
     };
 
     if (!pending_operations_[shard].empty()) {
-        persistPendingOperation(shard, operation);
+        if (!persistPendingOperation(shard, operation)) {
+            return {true, false, false};
+        }
 
         pending_operations_[shard].push_back(
             std::move(operation)
         );
 
-        return {true, false};
+        return {true, false, true};
     }
 
     if (!replicateOperation(operation)) {
-        persistPendingOperation(shard, operation);
+        if (!persistPendingOperation(shard, operation)) {
+            return {true, false, false};
+        }
 
         pending_operations_[shard].push_back(
             std::move(operation)
         );
 
-        return {true, false};
+        return {true, false, true};
     }
 
-    return {true, true};
+    return {true, true, true};
 }
 
 std::optional<std::string> ReplicaManager::get(
@@ -175,7 +184,7 @@ ReplicationResult ReplicaManager::removeWithResult(
         const bool removed =
             replica_shards_[shard]->remove(key);
 
-        return {removed, removed};
+        return {removed, removed, true};
     }
 
     const bool primary_removed =
@@ -188,7 +197,7 @@ ReplicationResult ReplicaManager::removeWithResult(
         primary_removed || replica_removed;
 
     if (!replication_client_) {
-        return {local_success, true};
+        return {local_success, true, true};
     }
 
     PendingOperation operation{
@@ -198,26 +207,30 @@ ReplicationResult ReplicaManager::removeWithResult(
     };
 
     if (!pending_operations_[shard].empty()) {
-        persistPendingOperation(shard, operation);
+        if (!persistPendingOperation(shard, operation)) {
+            return {local_success, false, false};
+        }
 
         pending_operations_[shard].push_back(
             std::move(operation)
         );
 
-        return {local_success, false};
+        return {local_success, false, true};
     }
 
     if (!replicateOperation(operation)) {
-        persistPendingOperation(shard, operation);
+        if (!persistPendingOperation(shard, operation)) {
+            return {local_success, false, false};
+        }
 
         pending_operations_[shard].push_back(
             std::move(operation)
         );
 
-        return {local_success, false};
+        return {local_success, false, true};
     }
 
-    return {local_success, true};
+    return {local_success, true, true};
 }
 
 bool ReplicaManager::exists(const std::string& key) const {
@@ -331,8 +344,6 @@ std::size_t ReplicaManager::retryPendingReplications() {
                 break;
             }
 
-            // Persist the acknowledgement before removing the
-            // operation from the in-memory queue.
             if (!persistPendingAcknowledgement(shard)) {
                 break;
             }
@@ -450,54 +461,85 @@ bool ReplicaManager::decodeHex(
     return true;
 }
 
+bool ReplicaManager::appendDurably(
+    const std::string& path,
+    const std::string& record
+) const {
+    const int fd = open(
+        path.c_str(),
+        O_WRONLY | O_CREAT | O_APPEND,
+        0644
+    );
+
+    if (fd < 0) {
+        return false;
+    }
+
+    std::size_t written = 0;
+    bool success = true;
+
+    while (written < record.size()) {
+        const ssize_t result = write(
+            fd,
+            record.data() + written,
+            record.size() - written
+        );
+
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            success = false;
+            break;
+        }
+
+        if (result == 0) {
+            success = false;
+            break;
+        }
+
+        written += static_cast<std::size_t>(result);
+    }
+
+    if (success && fsync(fd) != 0) {
+        success = false;
+    }
+
+    if (close(fd) != 0) {
+        success = false;
+    }
+
+    return success;
+}
+
 bool ReplicaManager::persistPendingOperation(
     std::size_t shard,
     const PendingOperation& operation
 ) const {
-    std::ofstream output(
-        pendingLogPath(shard),
-        std::ios::app | std::ios::binary
-    );
-
-    if (!output.is_open()) {
-        return false;
-    }
+    std::string record;
 
     if (operation.type == PendingOperation::Type::SET) {
-        output
-            << "S "
-            << encodeHex(operation.key)
-            << " "
-            << encodeHex(operation.value)
-            << '\n';
+        record =
+            "S " +
+            encodeHex(operation.key) +
+            " " +
+            encodeHex(operation.value) +
+            "\n";
     } else {
-        output
-            << "D "
-            << encodeHex(operation.key)
-            << '\n';
+        record =
+            "D " +
+            encodeHex(operation.key) +
+            "\n";
     }
 
-    output.flush();
-
-    return output.good();
+    return appendDurably(pendingLogPath(shard), record);
 }
 
 bool ReplicaManager::persistPendingAcknowledgement(
     std::size_t shard
 ) const {
-    std::ofstream output(
-        pendingLogPath(shard),
-        std::ios::app | std::ios::binary
-    );
-
-    if (!output.is_open()) {
-        return false;
-    }
-
-    output << "A\n";
-    output.flush();
-
-    return output.good();
+    return appendDurably(pendingLogPath(shard), "A\n");
 }
 
 void ReplicaManager::loadPendingOperations() {
@@ -506,82 +548,119 @@ void ReplicaManager::loadPendingOperations() {
         shard < pending_operations_.size();
         ++shard
     ) {
-        std::ifstream input(
-            pendingLogPath(shard),
-            std::ios::binary
-        );
+        const std::string path = pendingLogPath(shard);
+
+        std::ifstream input(path, std::ios::binary);
 
         if (!input.is_open()) {
             continue;
         }
 
-        std::string line;
+        std::string contents(
+            (std::istreambuf_iterator<char>(input)),
+            std::istreambuf_iterator<char>()
+        );
 
-        while (std::getline(input, line)) {
+        std::size_t position = 0;
+        std::size_t valid_bytes = 0;
+
+        while (position < contents.size()) {
+            const std::size_t newline =
+                contents.find('\n', position);
+
+            if (newline == std::string::npos) {
+                break;
+            }
+
+            const std::string line =
+                contents.substr(position, newline - position);
+
+            bool valid_record = false;
+
             if (line == "A") {
                 if (!pending_operations_[shard].empty()) {
                     pending_operations_[shard].pop_front();
                 }
 
-                continue;
+                valid_record = true;
+            } else if (line.size() >= 3 && line[1] == ' ') {
+                const char operation_type = line[0];
+                const std::string payload = line.substr(2);
+
+                if (operation_type == 'S') {
+                    const std::size_t separator =
+                        payload.find(' ');
+
+                    if (separator != std::string::npos) {
+                        std::string key;
+                        std::string value;
+
+                        if (
+                            decodeHex(
+                                payload.substr(0, separator),
+                                key
+                            ) &&
+                            decodeHex(
+                                payload.substr(separator + 1),
+                                value
+                            )
+                        ) {
+                            pending_operations_[shard].push_back({
+                                PendingOperation::Type::SET,
+                                std::move(key),
+                                std::move(value)
+                            });
+
+                            valid_record = true;
+                        }
+                    }
+                } else if (operation_type == 'D') {
+                    std::string key;
+
+                    if (decodeHex(payload, key)) {
+                        pending_operations_[shard].push_back({
+                            PendingOperation::Type::DELETE,
+                            std::move(key),
+                            ""
+                        });
+
+                        valid_record = true;
+                    }
+                }
             }
 
-            if (line.size() < 3 || line[1] != ' ') {
+            if (!valid_record) {
                 break;
             }
 
-            const char operation_type = line[0];
-            const std::string payload = line.substr(2);
+            valid_bytes = newline + 1;
+            position = newline + 1;
+        }
 
-            if (operation_type == 'S') {
-                const std::size_t separator = payload.find(' ');
+        if (valid_bytes < contents.size()) {
+            const int fd = open(path.c_str(), O_WRONLY);
 
-                if (separator == std::string::npos) {
-                    break;
-                }
-
-                std::string key;
-                std::string value;
-
-                if (
-                    !decodeHex(
-                        payload.substr(0, separator),
-                        key
-                    ) ||
-                    !decodeHex(
-                        payload.substr(separator + 1),
-                        value
-                    )
-                ) {
-                    break;
-                }
-
-                pending_operations_[shard].push_back({
-                    PendingOperation::Type::SET,
-                    std::move(key),
-                    std::move(value)
-                });
-
-                continue;
+            if (fd < 0) {
+                throw std::runtime_error(
+                    "Unable to open pending replication log for recovery: " +
+                    path
+                );
             }
 
-            if (operation_type == 'D') {
-                std::string key;
+            const bool truncated =
+                ftruncate(fd, static_cast<off_t>(valid_bytes)) == 0;
 
-                if (!decodeHex(payload, key)) {
-                    break;
-                }
+            const bool synced =
+                truncated && fsync(fd) == 0;
 
-                pending_operations_[shard].push_back({
-                    PendingOperation::Type::DELETE,
-                    std::move(key),
-                    ""
-                });
+            const bool closed = close(fd) == 0;
 
-                continue;
+            if (!truncated || !synced || !closed) {
+                throw std::runtime_error(
+                    "Unable to repair pending replication log: " +
+                    path
+                );
             }
-
-            break;
         }
     }
 }
