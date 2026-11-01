@@ -1,4 +1,6 @@
+
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -134,6 +136,85 @@ TEST_F(KVStoreTest, ConcurrentWrites) {
 
             ASSERT_TRUE(result.has_value());
             EXPECT_EQ(result.value(), "value_" + std::to_string(i));
+        }
+    }
+}
+
+TEST_F(KVStoreTest, ConcurrentSameKeyWrites) {
+    KVStore store(wal_file);
+
+    const int thread_count = 8;
+    const int operations_per_thread = 100;
+
+    std::vector<std::thread> threads;
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        threads.emplace_back([&store, thread_id]() {
+            for (int i = 0; i < operations_per_thread; ++i) {
+                store.set(
+                    "shared_key",
+                    "thread_" + std::to_string(thread_id) +
+                    "_value_" + std::to_string(i)
+                );
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    auto result = store.get("shared_key");
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->find("thread_") == 0);
+    EXPECT_NE(result->find("_value_"), std::string::npos);
+}
+
+TEST_F(KVStoreTest, ConcurrentMixedOperations) {
+    KVStore store(wal_file);
+
+    const int thread_count = 8;
+    const int operations_per_thread = 100;
+
+    std::vector<std::thread> threads;
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        threads.emplace_back([&store, thread_id]() {
+            for (int i = 0; i < operations_per_thread; ++i) {
+                std::string key =
+                    "key_" + std::to_string(thread_id) +
+                    "_" + std::to_string(i);
+
+                store.set(key, "value");
+                store.exists(key);
+                store.get(key);
+
+                if (i % 2 == 0) {
+                    store.remove(key);
+                }
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (int thread_id = 0; thread_id < thread_count; ++thread_id) {
+        for (int i = 0; i < operations_per_thread; ++i) {
+            std::string key =
+                "key_" + std::to_string(thread_id) +
+                "_" + std::to_string(i);
+
+            if (i % 2 == 0) {
+                EXPECT_FALSE(store.exists(key));
+            } else {
+                auto result = store.get(key);
+
+                ASSERT_TRUE(result.has_value());
+                EXPECT_EQ(result.value(), "value");
+            }
         }
     }
 }
